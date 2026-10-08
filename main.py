@@ -1,0 +1,74 @@
+import asyncio
+import logging
+import sys
+
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+
+from config import settings
+from database.connection import set_db_path
+from database.models import init_db
+from handlers.channel import router as channel_router
+from handlers.search import router as search_router
+from handlers.inline import router as inline_router
+from handlers.admin import router as admin_router
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger("bot")
+
+
+async def main() -> None:
+    logger.info("Initializing Telegram Audiobook & Library Bot...")
+
+    # Configure database
+    set_db_path(settings.DB_PATH)
+    await init_db()
+
+    # Initialize Bot instance with HTML parse mode
+    bot = Bot(
+        token=settings.BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+    )
+
+    # Initialize Dispatcher
+    dp = Dispatcher()
+
+    # Register Routers
+    # Note: Order matters. Channel posts & Admin commands first, then search & inline.
+    dp.include_router(channel_router)
+    dp.include_router(admin_router)
+    dp.include_router(search_router)
+    dp.include_router(inline_router)
+
+    # Startup hook to verify bot credentials
+    try:
+        bot_info = await bot.get_me()
+        if not settings.BOT_USERNAME:
+            settings.BOT_USERNAME = bot_info.username
+        logger.info(f"Bot started successfully as @{bot_info.username} (ID: {bot_info.id})")
+        logger.info(f"Storage Channel: {settings.STORAGE_CHANNEL_ID}")
+        if settings.UPDATES_CHANNEL_ID:
+            logger.info(f"Updates Broadcast Channel: {settings.UPDATES_CHANNEL_ID}")
+        logger.info(f"Admins: {settings.ADMIN_IDS}")
+
+        # Drop pending updates and start polling
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.critical(f"Fatal error while running bot: {e}", exc_info=True)
+    finally:
+        await bot.session.close()
+        logger.info("Bot session closed. Goodbye!")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped by user.")
