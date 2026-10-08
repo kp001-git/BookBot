@@ -276,7 +276,7 @@ async def handle_start(message: Message, command: CommandObject) -> None:
         "📚 <b>Welcome to the Digital Library & Audiobook Indexer!</b>\n\n"
         "🔍 <b>How to Search:</b>\n"
         "• Send any title or author name directly in this chat.\n"
-        "• Or use inline mode anywhere by typing <code>@YourBot title</code>.\n\n"
+        "• Or use inline mode anywhere by typing <code>@AudioSoulBot title</code>.\n\n"
         "⚡ All files are delivered instantly in native formats (Audiobooks, EPUB, PDF)!"
     )
     await message.answer(welcome_text, parse_mode="HTML")

@@ -25,7 +25,7 @@ The bot automatically indexes multimedia files (Audiobooks, EPUBs, PDFs, ZIP arc
    - Zero-bandwidth direct delivery leveraging Telegram's cached `file_id`.
 
 4. **Inline Mode & Deep-Linking:**
-   - Inline mode (`@YourBot <query>`) returning interactive articles with preview cards and deep-links.
+   - Inline mode (`@AudioSoulBot <query>`) returning interactive articles with preview cards and deep-links.
    - `/start book_<id>` deep-links to directly jump into book cards from channel broadcasts or inline shares.
 
 5. **Admin Analytics:**
@@ -48,7 +48,7 @@ The bot automatically indexes multimedia files (Audiobooks, EPUBs, PDFs, ZIP arc
 ├── handlers/
 │   ├── channel.py            # Channel ingestion, enrichment, and broadcast worker
 │   ├── search.py             # Direct search, pagination, book cards, and file delivery
-│   ├── inline.py             # Inline query mode handler (@YourBot <query>)
+│   ├── inline.py             # Inline query mode handler (@AudioSoulBot <query>)
 │   └── admin.py              # /stats command for admins
 ├── tests/
 │   └── test_pipeline.py      # Automated unit and integration test suite
@@ -71,7 +71,7 @@ ADMIN_IDS=123456789,987654321
 STORAGE_CHANNEL_ID=-1001234567890
 UPDATES_CHANNEL_ID=-1001987654321
 DB_PATH=data/library.db
-BOT_USERNAME=YourBotUsername
+BOT_USERNAME=AudioSoulBot
 ```
 
 > **Note on Channel IDs:** Add your bot as an administrator to both the storage channel and updates channel so it can read posts and send broadcasts.

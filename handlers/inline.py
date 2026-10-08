@@ -33,7 +33,7 @@ def format_inline_formats(formats: List[str]) -> str:
 
 @router.inline_query()
 async def handle_inline_query(inline_query: InlineQuery, bot: Bot) -> None:
-    """Handles inline search query across all chats (@YourBot <query>)."""
+    """Handles inline search query across all chats (@AudioSoulBot <query>)."""
     query = inline_query.query.strip()
     if not query:
         await inline_query.answer(
