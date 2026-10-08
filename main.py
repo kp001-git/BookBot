@@ -1,7 +1,10 @@
 import asyncio
 import logging
+import os
 import sys
+from typing import Optional
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -22,6 +25,37 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("bot")
+
+
+async def start_web_server() -> web.AppRunner:
+    """Runs a lightweight HTTP server so Render port check passes and UptimeRobot can keep the service awake."""
+    routes = web.RouteTableDef()
+
+    @routes.get("/")
+    async def handle_root(request: web.Request) -> web.Response:
+        return web.Response(
+            text="🎧 AudioSoulBot is running and healthy! 📚✨",
+            content_type="text/plain"
+        )
+
+    @routes.get("/health")
+    async def handle_health(request: web.Request) -> web.Response:
+        return web.json_response({
+            "status": "ok",
+            "bot": "@AudioSoulBot",
+            "service": "telegram-audiobook-bot"
+        })
+
+    app = web.Application()
+    app.add_routes(routes)
+
+    port = int(os.getenv("PORT", 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
+    logger.info(f"Health check HTTP server listening on http://0.0.0.0:{port}")
+    return runner
 
 
 async def main() -> None:
@@ -48,7 +82,11 @@ async def main() -> None:
     dp.include_router(inline_router)
 
     # Startup hook to verify bot credentials
+    web_runner: Optional[web.AppRunner] = None
     try:
+        # Start background HTTP server for Render and health checks
+        web_runner = await start_web_server()
+
         bot_info = await bot.get_me()
         if not settings.BOT_USERNAME:
             settings.BOT_USERNAME = bot_info.username
@@ -72,6 +110,9 @@ async def main() -> None:
     except Exception as e:
         logger.critical(f"Fatal error while running bot: {e}", exc_info=True)
     finally:
+        if web_runner:
+            await web_runner.cleanup()
+            logger.info("Health check HTTP server stopped.")
         await bot.session.close()
         logger.info("Bot session closed. Goodbye!")
 
