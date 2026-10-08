@@ -5,6 +5,7 @@ import sys
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand, BotCommandScopeDefault
 
 from config import settings
 from database.connection import set_db_path
@@ -56,6 +57,14 @@ async def main() -> None:
         if settings.UPDATES_CHANNEL_ID:
             logger.info(f"Updates Broadcast Channel: {settings.UPDATES_CHANNEL_ID}")
         logger.info(f"Admins: {settings.ADMIN_IDS}")
+
+        # Register bot commands menu in Telegram
+        bot_commands = [
+            BotCommand(command="start", description="Start bot & search library"),
+            BotCommand(command="stats", description="Admin metrics & statistics"),
+        ]
+        await bot.set_my_commands(bot_commands, scope=BotCommandScopeDefault())
+        logger.info("Bot commands successfully registered with Telegram.")
 
         # Drop pending updates and start polling
         await bot.delete_webhook(drop_pending_updates=True)
