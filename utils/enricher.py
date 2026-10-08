@@ -140,7 +140,7 @@ async def fetch_open_library_metadata(title: str, author: str, session: aiohttp.
 async def enrich_book_metadata(title: str, author: str) -> EnrichedMetadata:
     """Orchestrates Google Books lookup with Open Library fallback."""
     headers = {
-        "User-Agent": "TelegramAudiobookBot/1.0 (https://github.com/telegram-audiobook-bot)"
+        "User-Agent": "BookBot/1.0 (https://github.com/kp001-git/BookBot)"
     }
     async with aiohttp.ClientSession(headers=headers) as session:
         # Try Google Books first

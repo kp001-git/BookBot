@@ -1,4 +1,4 @@
-# Telegram Digital Library & Audiobook Indexer Bot
+# BookBot - Telegram Digital Library & Audiobook Indexer
 
 A high-performance, asynchronous Telegram bot built with **Python 3.11+**, **aiogram 3.x**, and **SQLite (FTS5)** via **aiosqlite**.
 
