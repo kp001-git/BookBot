@@ -11,8 +11,15 @@ from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, BotCommandScopeDefault
 
 from config import settings
-from database.connection import set_db_path
+from database.connection import (
+    set_db_path,
+    set_database_url,
+    is_postgres,
+    get_db_engine_name,
+    close_db
+)
 from database.models import init_db
+from database.backup import send_database_backup, sqlite_backup_worker
 from handlers.channel import router as channel_router
 from handlers.search import router as search_router
 from handlers.inline import router as inline_router
@@ -43,7 +50,8 @@ async def start_web_server() -> web.AppRunner:
         return web.json_response({
             "status": "ok",
             "bot": "@AudioSoulBot",
-            "service": "telegram-audiobook-bot"
+            "service": "telegram-audiobook-bot",
+            "database_engine": get_db_engine_name()
         })
 
     app = web.Application()
@@ -61,8 +69,14 @@ async def start_web_server() -> web.AppRunner:
 async def main() -> None:
     logger.info("Initializing Telegram Audiobook & Library Bot...")
 
-    # Configure database
-    set_db_path(settings.DB_PATH)
+    # Configure database: PostgreSQL if DATABASE_URL is set, otherwise fallback to SQLite
+    if settings.DATABASE_URL:
+        set_database_url(settings.DATABASE_URL)
+        logger.info("PostgreSQL mode configured via DATABASE_URL.")
+    else:
+        set_db_path(settings.DB_PATH)
+        logger.info(f"SQLite fallback mode active (Database file: {settings.DB_PATH}).")
+
     await init_db()
 
     # Initialize Bot instance with HTML parse mode
@@ -81,16 +95,34 @@ async def main() -> None:
     dp.include_router(search_router)
     dp.include_router(inline_router)
 
-    # Startup hook to verify bot credentials
+    # Register shutdown hook for immediate database backup on bot shutdown
+    @dp.shutdown()
+    async def on_shutdown() -> None:
+        logger.info("Bot shutdown signal received.")
+        if not is_postgres():
+            logger.info("Executing immediate SQLite backup upon shutdown...")
+            try:
+                await send_database_backup(bot)
+            except Exception as backup_err:
+                logger.error(f"Error during shutdown database backup: {backup_err}", exc_info=True)
+
     web_runner: Optional[web.AppRunner] = None
+    backup_task: Optional[asyncio.Task] = None
+
     try:
         # Start background HTTP server for Render and health checks
         web_runner = await start_web_server()
+
+        # Start periodic SQLite backup task if running in SQLite mode
+        if not is_postgres():
+            backup_task = asyncio.create_task(sqlite_backup_worker(bot))
+            logger.info("Automated 6-hour SQLite backup task spawned.")
 
         bot_info = await bot.get_me()
         if not settings.BOT_USERNAME:
             settings.BOT_USERNAME = bot_info.username
         logger.info(f"Bot started successfully as @{bot_info.username} (ID: {bot_info.id})")
+        logger.info(f"Database Engine: {get_db_engine_name()}")
         logger.info(f"Storage Channel: {settings.STORAGE_CHANNEL_ID}")
         if settings.UPDATES_CHANNEL_ID:
             logger.info(f"Updates Broadcast Channel: {settings.UPDATES_CHANNEL_ID}")
@@ -99,7 +131,9 @@ async def main() -> None:
         # Register bot commands menu in Telegram
         bot_commands = [
             BotCommand(command="start", description="Start bot & search library"),
+            BotCommand(command="help", description="How to search & use bot"),
             BotCommand(command="stats", description="Admin metrics & statistics"),
+            BotCommand(command="backup", description="Trigger instant database backup"),
         ]
         await bot.set_my_commands(bot_commands, scope=BotCommandScopeDefault())
         logger.info("Bot commands successfully registered with Telegram.")
@@ -110,6 +144,16 @@ async def main() -> None:
     except Exception as e:
         logger.critical(f"Fatal error while running bot: {e}", exc_info=True)
     finally:
+        if backup_task:
+            backup_task.cancel()
+            try:
+                await backup_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("Backup worker task stopped.")
+
+        await close_db()
+
         if web_runner:
             await web_runner.cleanup()
             logger.info("Health check HTTP server stopped.")

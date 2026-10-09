@@ -2,7 +2,7 @@ import math
 import logging
 from typing import Dict, Any, List, Optional
 from aiogram import Router, F, Bot
-from aiogram.filters import CommandStart, CommandObject
+from aiogram.filters import CommandStart, CommandObject, Command
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -277,9 +277,44 @@ async def handle_start(message: Message, command: CommandObject) -> None:
         "🔍 <b>How to Search:</b>\n"
         "• Send any title or author name directly in this chat.\n"
         "• Or use inline mode anywhere by typing <code>@AudioSoulBot title</code>.\n\n"
-        "⚡ All files are delivered instantly in native formats (Audiobooks, EPUB, PDF)!"
+        "⚡ All files are delivered instantly in native formats (Audiobooks, EPUB, PDF)!\n\n"
+        '👨‍💻 Developed by <a href="https://t.me/souldumpp">Soul</a>'
     )
-    await message.answer(welcome_text, parse_mode="HTML")
+    welcome_markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Developer", url="https://t.me/souldumpp")
+            ]
+        ]
+    )
+    await message.answer(welcome_text, parse_mode="HTML", reply_markup=welcome_markup)
+
+
+@router.message(Command("help"))
+async def handle_help(message: Message) -> None:
+    """Provides user guide on searching books and accessing formats."""
+    help_text = (
+        "📖 <b>Digital Library Help & Guide</b>\n\n"
+        "🔍 <b>Direct Chat Search:</b>\n"
+        "Send any title or author name directly in this chat to browse indexed results.\n\n"
+        "⚡ <b>Inline Mode Search:</b>\n"
+        "In any chat or group, type:\n"
+        "<code>@AudioSoulBot title</code>\n"
+        "Tap a result to view formats and download files.\n\n"
+        "🎧 <b>Supported Media Formats:</b>\n"
+        "• <b>Audiobooks:</b> Native `.m4b` / `.mp3` files & multi-track `.zip` archives\n"
+        "• <b>EPUBs:</b> Optimized digital books for e-readers & mobile\n"
+        "• <b>PDFs:</b> Documents and illustrated editions\n\n"
+        '👨‍💻 Developed by <a href="https://t.me/souldumpp">Soul</a>'
+    )
+    help_markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Developer", url="https://t.me/souldumpp")
+            ]
+        ]
+    )
+    await message.answer(help_text, parse_mode="HTML", reply_markup=help_markup)
 
 
 @router.message(F.text & ~F.text.startswith("/"))

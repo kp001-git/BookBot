@@ -3,9 +3,20 @@ import unittest
 import asyncio
 import tempfile
 
+import sqlite3
 from utils.parser import parse_media_metadata, detect_format, clean_text_noise
 from utils.enricher import format_duration, format_size
-from database.connection import set_db_path
+from config import Settings
+from database.connection import (
+    set_db_path,
+    set_database_url,
+    normalize_postgres_url_for_asyncpg,
+    to_asyncpg_scheme,
+    is_postgres,
+    get_db_engine_name
+)
+from database.backup import create_sqlite_backup_file
+from handlers.admin import get_uptime_duration
 from database.models import (
     init_db,
     upsert_book_and_file,
@@ -220,6 +231,128 @@ class TestPipeline(unittest.TestCase):
                     os.remove(temp_db)
 
         asyncio.run(run_db_tests())
+
+    def test_database_url_normalization_and_schemes(self):
+        # 1. URL normalization for asyncpg
+        url1 = "postgres://user:pass@ep-test.neon.tech/neondb?sslmode=require"
+        normalized1 = normalize_postgres_url_for_asyncpg(url1)
+        self.assertTrue(normalized1.startswith("postgresql://"))
+
+        url2 = "postgresql+asyncpg://user:pass@localhost:5432/testdb"
+        normalized2 = normalize_postgres_url_for_asyncpg(url2)
+        self.assertTrue(normalized2.startswith("postgresql://"))
+
+        # 2. Convert to asyncpg scheme
+        asyncpg_url = to_asyncpg_scheme("postgres://user:pass@localhost/db")
+        self.assertTrue(asyncpg_url.startswith("postgresql+asyncpg://"))
+
+        # 3. Switching active engine
+        set_database_url("postgres://user:pass@localhost/db")
+        self.assertTrue(is_postgres())
+        self.assertEqual(get_db_engine_name(), "PostgreSQL")
+
+        # Switching back to SQLite
+        set_db_path("data/library.db")
+        self.assertFalse(is_postgres())
+        self.assertEqual(get_db_engine_name(), "SQLite FTS5")
+
+    def test_sqlite_backup_creation(self):
+        async def run_backup_test():
+            with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+                temp_db = f.name
+
+            try:
+                set_db_path(temp_db)
+                await init_db()
+
+                await upsert_book_and_file(
+                    clean_title="Backup Test Title",
+                    clean_author="Backup Author",
+                    canonical_title="backup test title",
+                    canonical_author="backup author",
+                    format_type="AUDIO",
+                    file_id="backup_file_999",
+                )
+
+                backup_file = await create_sqlite_backup_file()
+                try:
+                    self.assertTrue(os.path.exists(backup_file))
+                    # Verify backup contains the book
+                    bck_conn = sqlite3.connect(backup_file)
+                    cursor = bck_conn.cursor()
+                    cursor.execute("SELECT clean_title FROM books WHERE clean_title = 'Backup Test Title'")
+                    row = cursor.fetchone()
+                    self.assertIsNotNone(row)
+                    self.assertEqual(row[0], "Backup Test Title")
+                    bck_conn.close()
+                finally:
+                    if os.path.exists(backup_file):
+                        os.remove(backup_file)
+            finally:
+                if os.path.exists(temp_db):
+                    os.remove(temp_db)
+
+        asyncio.run(run_backup_test())
+
+    def test_admin_uptime_and_stats_display(self):
+        uptime = get_uptime_duration()
+        self.assertTrue(any(u in uptime for u in ["s", "m", "h", "d"]))
+
+    def test_config_credentials_and_validation(self):
+        test_settings = Settings(
+            BOT_TOKEN="123456:FAKE_TOKEN_FOR_TESTING",
+            STORAGE_CHANNEL_ID="-1001234567890",
+            UPDATES_CHANNEL_ID="-1009876543210",
+            DATABASE_URL="   "
+        )
+        self.assertEqual(test_settings.STORAGE_CHANNEL_ID, -1001234567890)
+        self.assertEqual(test_settings.UPDATES_CHANNEL_ID, -1009876543210)
+        self.assertIsNone(test_settings.DATABASE_URL)
+
+    def test_developer_credits_and_attribution(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from handlers.search import handle_help, handle_start
+
+        async def run_attribution_test():
+            msg_help = MagicMock()
+            msg_help.answer = AsyncMock()
+
+            await handle_help(msg_help)
+
+            msg_help.answer.assert_called_once()
+            args, kwargs = msg_help.answer.call_args
+            text = args[0]
+            markup = kwargs.get("reply_markup")
+
+            self.assertIn("https://t.me/souldumpp", text)
+            self.assertIn("Soul", text)
+            self.assertIsNotNone(markup)
+            button = markup.inline_keyboard[0][0]
+            self.assertEqual(button.url, "https://t.me/souldumpp")
+            self.assertEqual(button.text, "Developer")
+
+            # Test /start welcome message and button
+            msg_start = MagicMock()
+            msg_start.from_user = None
+            msg_start.answer = AsyncMock()
+            cmd_start = MagicMock()
+            cmd_start.args = None
+
+            await handle_start(msg_start, cmd_start)
+
+            msg_start.answer.assert_called_once()
+            args_s, kwargs_s = msg_start.answer.call_args
+            text_s = args_s[0]
+            markup_s = kwargs_s.get("reply_markup")
+
+            self.assertIn("https://t.me/souldumpp", text_s)
+            self.assertIn("Soul", text_s)
+            self.assertIsNotNone(markup_s)
+            button_s = markup_s.inline_keyboard[0][0]
+            self.assertEqual(button_s.url, "https://t.me/souldumpp")
+            self.assertEqual(button_s.text, "Developer")
+
+        asyncio.run(run_attribution_test())
 
 
 if __name__ == "__main__":
