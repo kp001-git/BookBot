@@ -20,6 +20,7 @@ from database.connection import (
 )
 from database.models import init_db
 from database.backup import send_database_backup, sqlite_backup_worker
+from services.search import preload_catalog
 from handlers.channel import router as channel_router
 from handlers.search import router as search_router
 from handlers.inline import router as inline_router
@@ -78,6 +79,9 @@ async def main() -> None:
         logger.info(f"SQLite fallback mode active (Database file: {settings.DB_PATH}).")
 
     await init_db()
+    logger.info("Preloading in-memory book catalog cache for sub-2ms search...")
+    loaded_books = await preload_catalog()
+    logger.info(f"Catalog cache preloaded: {loaded_books:,} books ready in memory.")
 
     # Initialize Bot instance with HTML parse mode
     bot = Bot(

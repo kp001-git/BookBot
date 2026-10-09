@@ -52,7 +52,7 @@ async def run_backfill(
     limit: Optional[int] = None,
     skip_enrich: bool = True,
     enrich: Optional[bool] = None,
-    batch_size: int = 1,
+    batch_size: int = 200,
     db_path: Optional[str] = None
 ) -> dict:
     """
@@ -157,12 +157,12 @@ async def run_backfill(
             # Instant in-memory check to avoid redundant disk reads
             if channel_message_id in indexed_message_ids:
                 metrics["already_indexed"] += 1
-                if metrics["scanned"] % 100 == 0:
+                if metrics["scanned"] % batch_size == 0:
                     elapsed = time.perf_counter() - t_start
                     rate = metrics["scanned"] / elapsed if elapsed > 0 else 0
                     logger.info(
                         f"Progress: {metrics['scanned']} msgs scanned | "
-                        f"{metrics['indexed_new_files']} new indexed | "
+                        f"{metrics['indexed_new_files']} indexed | "
                         f"{metrics['already_indexed']} skipped | "
                         f"Rate: {rate:.1f} msgs/sec"
                     )
@@ -253,10 +253,18 @@ async def run_backfill(
                     indexed_message_ids.add(channel_message_id)
 
                     if len(batch_buffer) >= batch_size:
+                        flush_count = len(batch_buffer)
                         _, new_files = await batch_upsert_books_and_files(batch_buffer)
                         metrics["indexed_new_files"] += new_files
-                        metrics["already_indexed"] += (len(batch_buffer) - new_files)
+                        metrics["already_indexed"] += (flush_count - new_files)
                         batch_buffer.clear()
+                        elapsed = time.perf_counter() - t_start
+                        rate = metrics["scanned"] / elapsed if elapsed > 0 else 0
+                        logger.info(
+                            f"Flushed batch ({flush_count} items) | Scanned: {metrics['scanned']} msgs | "
+                            f"{metrics['indexed_new_files']} indexed | {metrics['already_indexed']} skipped | "
+                            f"Rate: {rate:.1f} msgs/sec"
+                        )
                 else:
                     # Direct insert into database.models.insert_or_update_book with cover_url=None, description=None
                     book_id, is_new_book, is_new_file = await insert_or_update_book(
@@ -278,10 +286,6 @@ async def run_backfill(
 
                     if is_new_file:
                         metrics["indexed_new_files"] += 1
-                        logger.info(
-                            f"[{metrics['indexed_new_files']}] Indexed (msg #{channel_message_id}): "
-                            f"'{parsed.clean_title}' by '{parsed.clean_author}' [{parsed.format_type}] (Book ID: {book_id})"
-                        )
                         # Optional enrichment only if explicitly requested (default skip_enrich is True)
                         if not skip_enrich and is_new_book:
                             try:
@@ -312,23 +316,31 @@ async def run_backfill(
                 metrics["errors"] += 1
                 logger.error(f"Error parsing message ID {message.id}: {e}")
 
-            # Progress logging every 100 messages
-            if metrics["scanned"] % 100 == 0:
+            # Progress logging every batch_size messages (e.g. 200)
+            if metrics["scanned"] % batch_size == 0:
                 elapsed = time.perf_counter() - t_start
                 rate = metrics["scanned"] / elapsed if elapsed > 0 else 0
                 logger.info(
                     f"Progress: {metrics['scanned']} msgs scanned | "
-                    f"{metrics['indexed_new_files']} new indexed | "
+                    f"{metrics['indexed_new_files']} indexed | "
                     f"{metrics['already_indexed']} skipped | "
                     f"Rate: {rate:.1f} msgs/sec"
                 )
 
         # Flush any remaining items in batch buffer
         if batch_buffer:
+            flush_count = len(batch_buffer)
             _, new_files = await batch_upsert_books_and_files(batch_buffer)
             metrics["indexed_new_files"] += new_files
-            metrics["already_indexed"] += (len(batch_buffer) - new_files)
+            metrics["already_indexed"] += (flush_count - new_files)
             batch_buffer.clear()
+            elapsed = time.perf_counter() - t_start
+            rate = metrics["scanned"] / elapsed if elapsed > 0 else 0
+            logger.info(
+                f"Flushed final batch ({flush_count} items) | Scanned: {metrics['scanned']} msgs | "
+                f"{metrics['indexed_new_files']} indexed | {metrics['already_indexed']} skipped | "
+                f"Rate: {rate:.1f} msgs/sec"
+            )
 
     finally:
         if client.is_connected():
@@ -422,8 +434,8 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=1,
-        help="Batch size for database writes (default: 1 in WAL mode; set >1 for buffered batching)"
+        default=200,
+        help="Batch size for database writes (default: 200 for fast remote PostgreSQL bulk ingestion)"
     )
     parser.add_argument(
         "--db-path",

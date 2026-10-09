@@ -117,6 +117,18 @@ async def handle_storage_channel_post(message: Message, bot: Bot) -> None:
         f"is_new_file={is_new_file}, title='{parsed.clean_title}'"
     )
 
+    # In-memory cache real-time synchronization
+    try:
+        from services.search import add_or_update_catalog_book
+        add_or_update_catalog_book(
+            book_id=book_id,
+            clean_title=parsed.clean_title,
+            clean_author=parsed.clean_author,
+            formats=[parsed.format_type]
+        )
+    except Exception as c_err:
+        logger.warning(f"Error updating in-memory catalog cache: {c_err}")
+
     # Enrichment pipeline (for new books or whenever indexed)
     cover_url = None
     description = None
@@ -141,6 +153,19 @@ async def handle_storage_channel_post(message: Message, bot: Bot) -> None:
                 genres=genres,
                 year=year
             )
+            # Update cache with enriched cover and description
+            try:
+                from services.search import add_or_update_catalog_book
+                add_or_update_catalog_book(
+                    book_id=book_id,
+                    clean_title=parsed.clean_title,
+                    clean_author=parsed.clean_author,
+                    formats=[parsed.format_type],
+                    cover_url=cover_url,
+                    description=description
+                )
+            except Exception:
+                pass
             logger.info(f"Enriched book ID {book_id} with API metadata.")
         except Exception as e:
             logger.warning(f"Error enriching book {book_id}: {e}")

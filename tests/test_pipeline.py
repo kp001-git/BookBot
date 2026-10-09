@@ -612,8 +612,25 @@ class TestPipeline(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_migrate_sqlite_to_pg_helpers(self):
+        from utils.migrate_sqlite_to_pg import parse_timestamp
+        from datetime import datetime
+
+        self.assertIsNone(parse_timestamp(None))
+        self.assertIsNone(parse_timestamp(""))
+        dt_str = "2026-10-05 16:52:56"
+        dt = parse_timestamp(dt_str)
+        self.assertIsInstance(dt, datetime)
+        self.assertEqual(dt.year, 2026)
+        self.assertEqual(dt.month, 10)
+        self.assertEqual(dt.day, 5)
+        self.assertEqual(dt.hour, 16)
+        self.assertEqual(dt.minute, 52)
+        self.assertEqual(dt.second, 56)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
