@@ -7,6 +7,7 @@ Optimized for high-throughput ingestion (>100 items/sec) with synchronous API en
 
 import os
 import sys
+import time
 import argparse
 import asyncio
 import logging
@@ -29,7 +30,6 @@ from database.connection import set_db_path, set_database_url, get_db_engine_nam
 from database.models import (
     init_db,
     insert_or_update_book,
-    upsert_book_and_file,
     batch_upsert_books_and_files,
     is_file_indexed,
     get_indexed_message_ids
@@ -52,7 +52,8 @@ async def run_backfill(
     limit: Optional[int] = None,
     skip_enrich: bool = True,
     enrich: Optional[bool] = None,
-    batch_size: int = 1
+    batch_size: int = 1,
+    db_path: Optional[str] = None
 ) -> dict:
     """
     Connects to Telegram via Telethon, iterates historical channel messages,
@@ -63,7 +64,9 @@ async def run_backfill(
         skip_enrich = not enrich
 
     logger.info("Initializing database...")
-    if config.DATABASE_URL:
+    if db_path:
+        set_db_path(db_path)
+    elif config.DATABASE_URL:
         set_database_url(config.DATABASE_URL)
     else:
         set_db_path(config.DB_PATH)
@@ -83,19 +86,6 @@ async def run_backfill(
     except Exception as e:
         logger.warning(f"Could not preload indexed message IDs: {e}")
 
-    client = TelegramClient(session_name, api_id, api_hash)
-    if bot_token:
-        logger.info("Connecting via Bot Token authentication...")
-        await client.start(bot_token=bot_token)
-    elif phone:
-        logger.info(f"Connecting via User Phone authentication ({phone})...")
-        await client.start(phone=phone)
-    else:
-        logger.info("Connecting via User Session (interactive)...")
-        await client.start()
-
-    logger.info("Connected to Telegram successfully.")
-
     metrics = {
         "scanned": 0,
         "indexed_new_files": 0,
@@ -104,13 +94,31 @@ async def run_backfill(
         "errors": 0
     }
 
-    t_start = asyncio.get_event_loop().time()
+    t_start = time.perf_counter()
     batch_buffer: List[Dict[str, Any]] = []
 
+    client = TelegramClient(session_name, api_id, api_hash)
     try:
-        # Prime entity cache by fetching dialogs
-        logger.info("Fetching dialogs to prime channel cache...")
-        dialogs = await client.get_dialogs()
+        if bot_token:
+            logger.info("Connecting via Bot Token authentication...")
+            await client.start(bot_token=bot_token)
+        elif phone:
+            logger.info(f"Connecting via User Phone authentication ({phone})...")
+            await client.start(phone=phone)
+        else:
+            logger.info("Connecting via User Session (interactive)...")
+            await client.start()
+
+        logger.info("Connected to Telegram successfully.")
+
+        # Prime entity cache by fetching dialogs (for user accounts only)
+        dialogs = []
+        if not bot_token:
+            try:
+                logger.info("Fetching dialogs to prime channel cache...")
+                dialogs = await client.get_dialogs()
+            except Exception as e:
+                logger.debug(f"Dialog cache priming skipped or failed: {e}")
 
         # Try getting entity with normalization fallbacks
         target_channel = None
@@ -150,7 +158,7 @@ async def run_backfill(
             if channel_message_id in indexed_message_ids:
                 metrics["already_indexed"] += 1
                 if metrics["scanned"] % 100 == 0:
-                    elapsed = asyncio.get_event_loop().time() - t_start
+                    elapsed = time.perf_counter() - t_start
                     rate = metrics["scanned"] / elapsed if elapsed > 0 else 0
                     logger.info(
                         f"Progress: {metrics['scanned']} msgs scanned | "
@@ -247,6 +255,7 @@ async def run_backfill(
                     if len(batch_buffer) >= batch_size:
                         _, new_files = await batch_upsert_books_and_files(batch_buffer)
                         metrics["indexed_new_files"] += new_files
+                        metrics["already_indexed"] += (len(batch_buffer) - new_files)
                         batch_buffer.clear()
                 else:
                     # Direct insert into database.models.insert_or_update_book with cover_url=None, description=None
@@ -305,7 +314,7 @@ async def run_backfill(
 
             # Progress logging every 100 messages
             if metrics["scanned"] % 100 == 0:
-                elapsed = asyncio.get_event_loop().time() - t_start
+                elapsed = time.perf_counter() - t_start
                 rate = metrics["scanned"] / elapsed if elapsed > 0 else 0
                 logger.info(
                     f"Progress: {metrics['scanned']} msgs scanned | "
@@ -318,13 +327,15 @@ async def run_backfill(
         if batch_buffer:
             _, new_files = await batch_upsert_books_and_files(batch_buffer)
             metrics["indexed_new_files"] += new_files
+            metrics["already_indexed"] += (len(batch_buffer) - new_files)
             batch_buffer.clear()
 
     finally:
-        await client.disconnect()
+        if client.is_connected():
+            await client.disconnect()
         await close_db()
 
-    t_total = asyncio.get_event_loop().time() - t_start
+    t_total = time.perf_counter() - t_start
     overall_rate = metrics["scanned"] / t_total if t_total > 0 else 0
 
     logger.info("=" * 60)
@@ -414,6 +425,12 @@ def main():
         default=1,
         help="Batch size for database writes (default: 1 in WAL mode; set >1 for buffered batching)"
     )
+    parser.add_argument(
+        "--db-path",
+        type=str,
+        default=None,
+        help="Custom SQLite DB path (defaults to DB_PATH in .env)"
+    )
 
     args = parser.parse_args()
 
@@ -451,7 +468,8 @@ def main():
             bot_token=bot_token,
             limit=args.limit,
             skip_enrich=args.skip_enrich,
-            batch_size=args.batch_size
+            batch_size=args.batch_size,
+            db_path=args.db_path
         )
     )
 

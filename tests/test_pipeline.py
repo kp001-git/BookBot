@@ -598,7 +598,8 @@ class TestPipeline(unittest.TestCase):
                     channel_id=-1004392683191,
                     session_name="test_session",
                     skip_enrich=True,
-                    limit=1
+                    limit=1,
+                    db_path=temp_db
                 )
 
                 # Enrichment MUST NOT be called
