@@ -10,6 +10,7 @@ from aiogram.types import (
     InlineKeyboardButton
 )
 
+from config import config, settings
 from utils.enricher import format_size, format_duration, enrich_book_metadata
 from database.models import (
     search_books,
@@ -462,39 +463,62 @@ async def handle_download_callback(callback: CallbackQuery, bot: Bot) -> None:
     user_id = callback.from_user.id
     fmt = file_record["format"]
     fname = file_record.get("file_name") or ""
-    telegram_file_id = file_record["file_id"]
+    telegram_file_id = file_record.get("file_id")
+    channel_msg_id = file_record.get("channel_message_id")
     title = file_record["clean_title"]
     author = file_record["clean_author"]
 
     await callback.answer("⚡ Sending file...")
 
-    caption = f"📖 <b>{title}</b>\n✍️ {author}"
+    delivered = False
 
-    try:
-        # Deliver via send_audio ONLY for native audio files, archives must use send_document
+    # Primary delivery method: copy_message from STORAGE_CHANNEL_ID if channel_message_id is present
+    if channel_msg_id and config.STORAGE_CHANNEL_ID:
+        try:
+            await bot.copy_message(
+                chat_id=user_id,
+                from_chat_id=config.STORAGE_CHANNEL_ID,
+                message_id=channel_msg_id
+            )
+            delivered = True
+            logger.info(
+                f"Delivered {fmt} file {file_row_id} via copy_message "
+                f"(message_id={channel_msg_id}, channel={config.STORAGE_CHANNEL_ID}) to user {user_id}"
+            )
+        except Exception as copy_err:
+            logger.warning(
+                f"copy_message failed for message_id={channel_msg_id} ({copy_err}), falling back to direct delivery."
+            )
+
+    # Fallback delivery method: send_audio or send_document using telegram_file_id
+    if not delivered and telegram_file_id:
+        caption = f"📖 <b>{title}</b>\n✍️ {author}"
         is_archive = is_archive_file(fname, fmt)
-        if fmt == "AUDIO" and not is_archive:
-            await bot.send_audio(
-                chat_id=user_id,
-                audio=telegram_file_id,
-                caption=caption,
-                title=title,
-                performer=author,
-                parse_mode="HTML"
-            )
-        else:
-            await bot.send_document(
-                chat_id=user_id,
-                document=telegram_file_id,
-                caption=caption,
-                parse_mode="HTML"
-            )
+        try:
+            if fmt == "AUDIO" and not is_archive:
+                await bot.send_audio(
+                    chat_id=user_id,
+                    audio=telegram_file_id,
+                    caption=caption,
+                    title=title,
+                    performer=author,
+                    parse_mode="HTML"
+                )
+            else:
+                await bot.send_document(
+                    chat_id=user_id,
+                    document=telegram_file_id,
+                    caption=caption,
+                    parse_mode="HTML"
+                )
+            delivered = True
+            logger.info(f"Delivered {fmt} file {file_row_id} via send_audio/send_document to user {user_id}")
+        except Exception as send_err:
+            logger.error(f"Error sending file {telegram_file_id} to {user_id}: {send_err}")
 
-        # Track download count
+    if delivered:
         await increment_user_downloads(user_id)
-        logger.info(f"Delivered {fmt} file {file_row_id} to user {user_id}")
-    except Exception as e:
-        logger.error(f"Error sending file {telegram_file_id} to {user_id}: {e}")
+    else:
         if callback.message:
             await callback.message.answer("⚠️ Failed to deliver file. Please check back later.")
 

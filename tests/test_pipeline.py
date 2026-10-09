@@ -309,6 +309,34 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(test_settings.UPDATES_CHANNEL_ID, -1009876543210)
         self.assertIsNone(test_settings.DATABASE_URL)
 
+    def test_storage_channel_id_flexible_validation(self):
+        from handlers.channel import is_storage_channel
+        from config import settings
+
+        orig = settings.STORAGE_CHANNEL_ID
+        try:
+            settings.STORAGE_CHANNEL_ID = -1004392683191
+
+            # Exact int
+            self.assertTrue(is_storage_channel(-1004392683191))
+            # String representation
+            self.assertTrue(is_storage_channel("-1004392683191"))
+            # Unprefixed representation
+            self.assertTrue(is_storage_channel("4392683191"))
+            self.assertTrue(is_storage_channel(4392683191))
+            # Mismatched ID
+            self.assertFalse(is_storage_channel(-1001111111111))
+            self.assertFalse(is_storage_channel("999999999"))
+        finally:
+            settings.STORAGE_CHANNEL_ID = orig
+
+    def test_models_and_config_aliases(self):
+        from config import config, settings
+        from database.models import insert_or_update_book, upsert_book_and_file
+
+        self.assertIs(config, settings)
+        self.assertIs(insert_or_update_book, upsert_book_and_file)
+
     def test_developer_credits_and_attribution(self):
         from unittest.mock import AsyncMock, MagicMock
         from handlers.search import handle_help, handle_start
@@ -354,6 +382,237 @@ class TestPipeline(unittest.TestCase):
 
         asyncio.run(run_attribution_test())
 
+    def test_fuzzy_search_fallback(self):
+        from database.models import is_file_indexed
+
+        async def run_fuzzy_test():
+            with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+                temp_db = f.name
+            try:
+                set_db_path(temp_db)
+                await init_db()
+
+                await upsert_book_and_file(
+                    clean_title="Atomic Habits",
+                    clean_author="James Clear",
+                    canonical_title="atomic habits",
+                    canonical_author="james clear",
+                    format_type="EPUB",
+                    file_id="epub_atomic_123",
+                    file_size=2000000,
+                    channel_message_id=42
+                )
+
+                # 1. Exact search matches via FTS5
+                exact_results, count = await search_books("Atomic Habits")
+                self.assertEqual(count, 1)
+                self.assertEqual(exact_results[0]["clean_title"], "Atomic Habits")
+
+                # 2. Typo query fails in FTS5 prefix match but catches in rapidfuzz fallback
+                fuzzy_results, f_count = await search_books("Atmoic Habits")
+                self.assertGreaterEqual(f_count, 1)
+                self.assertEqual(fuzzy_results[0]["clean_title"], "Atomic Habits")
+
+                # 3. Check is_file_indexed
+                self.assertTrue(await is_file_indexed(channel_message_id=42))
+                self.assertTrue(await is_file_indexed(file_id="epub_atomic_123"))
+                self.assertFalse(await is_file_indexed(channel_message_id=9999))
+            finally:
+                if os.path.exists(temp_db):
+                    os.remove(temp_db)
+
+        asyncio.run(run_fuzzy_test())
+
+    def test_delivery_copy_message_with_fallback(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from handlers.search import handle_download_callback
+        from config import settings
+
+        async def run_delivery_test():
+            with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+                temp_db = f.name
+            try:
+                set_db_path(temp_db)
+                await init_db()
+
+                b_id, _, _ = await upsert_book_and_file(
+                    clean_title="Delivery Test Book",
+                    clean_author="Test Author",
+                    canonical_title="delivery test book",
+                    canonical_author="test author",
+                    format_type="AUDIO",
+                    file_id="audio_file_deliv",
+                    file_size=1000000,
+                    channel_message_id=555
+                )
+
+                # Fetch file record ID
+                book = await get_book_by_id(b_id)
+                file_row_id = book["files"][0]["id"]
+
+                # Case A: copy_message succeeds
+                bot_mock = MagicMock()
+                bot_mock.copy_message = AsyncMock()
+                bot_mock.send_audio = AsyncMock()
+                bot_mock.send_document = AsyncMock()
+
+                cb_mock = MagicMock()
+                cb_mock.data = f"dl:{file_row_id}"
+                cb_mock.from_user.id = 99999
+                cb_mock.answer = AsyncMock()
+                cb_mock.message = None
+
+                await handle_download_callback(cb_mock, bot_mock)
+
+                bot_mock.copy_message.assert_called_once_with(
+                    chat_id=99999,
+                    from_chat_id=settings.STORAGE_CHANNEL_ID,
+                    message_id=555
+                )
+                bot_mock.send_audio.assert_not_called()
+
+                # Case B: copy_message fails -> fallback to direct send
+                bot_mock.reset_mock()
+                bot_mock.copy_message.side_effect = Exception("Message deleted in channel")
+
+                await handle_download_callback(cb_mock, bot_mock)
+
+                bot_mock.copy_message.assert_called_once()
+                bot_mock.send_audio.assert_called_once()
+            finally:
+                if os.path.exists(temp_db):
+                    os.remove(temp_db)
+
+        asyncio.run(run_delivery_test())
+
+    def test_insert_or_update_book_with_cover_and_description(self):
+        from database.connection import set_db_path
+        from database.models import init_db, insert_or_update_book, get_book_by_id
+
+        async def run_insert_test():
+            temp_db = "scratch/test_insert_cover.db"
+            os.makedirs("scratch", exist_ok=True)
+            set_db_path(temp_db)
+            await init_db()
+
+            try:
+                # Direct call with cover_url=None, description=None
+                book_id, is_new_b, is_new_f = await insert_or_update_book(
+                    clean_title="Wal Mode Book",
+                    clean_author="Wal Author",
+                    canonical_title="wal mode book",
+                    canonical_author="wal author",
+                    format_type="AUDIO",
+                    file_id="wal_file_123",
+                    cover_url=None,
+                    description=None,
+                    channel_message_id=9876
+                )
+                self.assertTrue(is_new_b)
+                self.assertTrue(is_new_f)
+
+                book = await get_book_by_id(book_id)
+                self.assertIsNotNone(book)
+                self.assertEqual(book["clean_title"], "Wal Mode Book")
+                self.assertIsNone(book["cover_url"])
+                self.assertIsNone(book["description"])
+            finally:
+                if os.path.exists(temp_db):
+                    os.remove(temp_db)
+
+        asyncio.run(run_insert_test())
+
+    def test_backfill_cli_arguments_parsing(self):
+        import argparse
+        from utils.backfill import main
+
+        # Simulate argparse setup verification
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--skip-enrich", action="store_true", default=True)
+        parser.add_argument("--enrich", dest="skip_enrich", action="store_false")
+        parser.add_argument("--no-enrich", dest="skip_enrich", action="store_true")
+
+        # Default is True
+        args = parser.parse_args([])
+        self.assertTrue(args.skip_enrich)
+
+        # --enrich sets to False
+        args = parser.parse_args(["--enrich"])
+        self.assertFalse(args.skip_enrich)
+
+        # --skip-enrich sets to True
+        args = parser.parse_args(["--skip-enrich"])
+        self.assertTrue(args.skip_enrich)
+
+        # --no-enrich sets to True
+        args = parser.parse_args(["--no-enrich"])
+        self.assertTrue(args.skip_enrich)
+
+    def test_backfill_run_skips_external_enrichment(self):
+        from unittest.mock import AsyncMock, patch, MagicMock
+        from utils.backfill import run_backfill
+
+        async def run_test():
+            temp_db = "scratch/test_backfill_mock.db"
+            os.makedirs("scratch", exist_ok=True)
+
+            mock_enrich = AsyncMock()
+
+            # Mock Telethon client
+            mock_client = MagicMock()
+            mock_client.start = AsyncMock()
+            mock_client.disconnect = AsyncMock()
+            mock_client.get_dialogs = AsyncMock(return_value=[])
+            target_entity = MagicMock(id=123, title="Target Storage")
+            mock_client.get_entity = AsyncMock(return_value=target_entity)
+
+            # Mock message with audio document
+            from telethon.tl.types import Document, DocumentAttributeFilename, DocumentAttributeAudio
+            doc = MagicMock(spec=Document)
+            doc.id = 99991111
+            doc.size = 12345
+            doc.mime_type = "audio/mpeg"
+            doc.attributes = [
+                DocumentAttributeFilename(file_name="Deep Work - Cal Newport.mp3"),
+                DocumentAttributeAudio(duration=1800, title="Deep Work", performer="Cal Newport")
+            ]
+
+            mock_msg = MagicMock()
+            mock_msg.id = 101
+            mock_msg.media = doc
+            mock_msg.document = doc
+            mock_msg.file = None
+            mock_msg.message = "Deep Work by Cal Newport"
+            mock_msg.raw_text = "Deep Work by Cal Newport"
+
+            async def mock_iter(entity, limit=None):
+                yield mock_msg
+
+            mock_client.iter_messages = mock_iter
+
+            with patch("utils.backfill.TelegramClient", return_value=mock_client), \
+                 patch("utils.enricher.enrich_book_metadata", mock_enrich):
+                metrics = await run_backfill(
+                    api_id=12345,
+                    api_hash="fakehash",
+                    channel_id=-1004392683191,
+                    session_name="test_session",
+                    skip_enrich=True,
+                    limit=1
+                )
+
+                # Enrichment MUST NOT be called
+                mock_enrich.assert_not_called()
+                self.assertEqual(metrics["scanned"], 1)
+                self.assertEqual(metrics["indexed_new_files"], 1)
+
+            if os.path.exists(temp_db):
+                os.remove(temp_db)
+
+        asyncio.run(run_test())
+
 
 if __name__ == "__main__":
     unittest.main()
+
+

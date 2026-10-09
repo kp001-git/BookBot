@@ -1,4 +1,5 @@
 import re
+import asyncio
 import aiosqlite
 import logging
 from typing import Dict, List, Optional, Tuple, Any
@@ -37,15 +38,27 @@ async def _sqlite_init_db() -> None:
             CREATE TABLE IF NOT EXISTS book_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 book_id INTEGER NOT NULL,
-                format TEXT NOT NULL,          -- 'AUDIO', 'EPUB', 'PDF', 'ZIP'
-                file_id TEXT NOT NULL UNIQUE,   -- Telegram file_id for direct delivery
-                file_size INTEGER,              -- in bytes
+                format TEXT NOT NULL,                  -- 'AUDIO', 'EPUB', 'PDF', 'ZIP'
+                file_id TEXT NOT NULL UNIQUE,           -- Telegram file_id for direct delivery
+                file_unique_id TEXT,                    -- Telegram file_unique_id for deduplication
+                channel_message_id INTEGER,             -- Storage channel message ID for copy_message
+                file_size INTEGER,                      -- in bytes
                 file_name TEXT,
-                duration INTEGER,               -- in seconds for audiobooks
+                duration INTEGER,                       -- in seconds for audiobooks
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
             );
         """)
+
+        # Database Migrations for existing databases
+        try:
+            await conn.execute("ALTER TABLE book_files ADD COLUMN channel_message_id INTEGER;")
+        except Exception:
+            pass
+        try:
+            await conn.execute("ALTER TABLE book_files ADD COLUMN file_unique_id TEXT;")
+        except Exception:
+            pass
 
         # Full Text Search Virtual Table for fast sub-second queries
         await conn.execute("""
@@ -95,6 +108,8 @@ async def _sqlite_init_db() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_books_canonical ON books(canonical_title, canonical_author);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_book_id ON book_files(book_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_format ON book_files(book_id, format);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_msg_id ON book_files(channel_message_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_unique_id ON book_files(file_unique_id);")
 
         await conn.commit()
         logger.info("SQLite database schema initialized successfully.")
@@ -117,7 +132,11 @@ async def _sqlite_upsert_book_and_file(
     file_id: str,
     file_size: Optional[int] = None,
     file_name: Optional[str] = None,
-    duration: Optional[int] = None
+    duration: Optional[int] = None,
+    channel_message_id: Optional[int] = None,
+    file_unique_id: Optional[str] = None,
+    cover_url: Optional[str] = None,
+    description: Optional[str] = None
 ) -> Tuple[int, bool, bool]:
     async with get_connection() as conn:
         cursor = await conn.execute(
@@ -134,14 +153,24 @@ async def _sqlite_upsert_book_and_file(
         is_new_book = False
         if row:
             book_id = row["id"]
+            if cover_url or description:
+                await conn.execute(
+                    """
+                    UPDATE books
+                    SET cover_url = COALESCE(cover_url, ?),
+                        description = COALESCE(description, ?)
+                    WHERE id = ?
+                    """,
+                    (cover_url, description, book_id)
+                )
         else:
             try:
                 cursor = await conn.execute(
                     """
-                    INSERT INTO books (clean_title, clean_author, canonical_title, canonical_author)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO books (clean_title, clean_author, canonical_title, canonical_author, cover_url, description)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (clean_title, clean_author, canonical_title, canonical_author)
+                    (clean_title, clean_author, canonical_title, canonical_author, cover_url, description)
                 )
                 book_id = cursor.lastrowid
                 is_new_book = True
@@ -153,18 +182,43 @@ async def _sqlite_upsert_book_and_file(
                 existing = await cursor.fetchone()
                 book_id = existing["id"]
 
+        # Check if file already exists by file_id, file_unique_id, or channel_message_id
+        existing_file = None
+        if file_id:
+            f_cur = await conn.execute("SELECT id, channel_message_id, file_unique_id FROM book_files WHERE file_id = ?", (file_id,))
+            existing_file = await f_cur.fetchone()
+        if not existing_file and file_unique_id:
+            f_cur = await conn.execute("SELECT id, channel_message_id, file_unique_id FROM book_files WHERE file_unique_id = ?", (file_unique_id,))
+            existing_file = await f_cur.fetchone()
+        if not existing_file and channel_message_id:
+            f_cur = await conn.execute("SELECT id, channel_message_id, file_unique_id FROM book_files WHERE channel_message_id = ?", (channel_message_id,))
+            existing_file = await f_cur.fetchone()
+
         is_new_file = False
-        try:
-            cursor = await conn.execute(
-                """
-                INSERT INTO book_files (book_id, format, file_id, file_size, file_name, duration)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (book_id, format_type, file_id, file_size, file_name, duration)
-            )
-            is_new_file = True
-        except aiosqlite.IntegrityError:
-            pass
+        if existing_file:
+            # Update missing attributes on existing file record
+            if channel_message_id or file_unique_id:
+                await conn.execute(
+                    """
+                    UPDATE book_files
+                    SET channel_message_id = COALESCE(channel_message_id, ?),
+                        file_unique_id = COALESCE(file_unique_id, ?)
+                    WHERE id = ?
+                    """,
+                    (channel_message_id, file_unique_id, existing_file["id"])
+                )
+        else:
+            try:
+                cursor = await conn.execute(
+                    """
+                    INSERT INTO book_files (book_id, format, file_id, file_unique_id, channel_message_id, file_size, file_name, duration)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (book_id, format_type, file_id, file_unique_id, channel_message_id, file_size, file_name, duration)
+                )
+                is_new_file = True
+            except aiosqlite.IntegrityError:
+                pass
 
         await conn.commit()
         return book_id, is_new_book, is_new_file
@@ -247,6 +301,73 @@ async def _sqlite_search_books(query: str, limit: int = 5, offset: int = 0) -> T
         return results, total
 
 
+async def _sqlite_fuzzy_search_books(query: str, limit: int = 5, score_cutoff: float = 65.0) -> Tuple[List[Dict[str, Any]], int]:
+    """Fallback fuzzy search over recent books using rapidfuzz token_set_ratio."""
+    try:
+        from rapidfuzz import process, fuzz
+    except ImportError:
+        logger.warning("rapidfuzz not available; fuzzy fallback skipped.")
+        return [], 0
+
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            """
+            SELECT b.id, b.clean_title, b.clean_author, b.cover_url, b.description,
+                   b.rating, b.genres, b.year,
+                   GROUP_CONCAT(DISTINCT f.format) as formats
+            FROM books b
+            LEFT JOIN book_files f ON f.book_id = b.id
+            GROUP BY b.id
+            ORDER BY b.id DESC
+            LIMIT 500
+            """
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return [], 0
+
+        candidates = []
+        clean_titles = []
+        for r in rows:
+            formats_str = r["formats"] or ""
+            formats_list = [fmt.strip() for fmt in formats_str.split(",") if fmt.strip()]
+            candidates.append({
+                "id": r["id"],
+                "clean_title": r["clean_title"],
+                "clean_author": r["clean_author"],
+                "cover_url": r["cover_url"],
+                "description": r["description"],
+                "rating": r["rating"],
+                "genres": r["genres"],
+                "year": r["year"],
+                "formats": formats_list,
+            })
+            clean_titles.append(r["clean_title"])
+
+        matches = await asyncio.to_thread(
+            process.extract,
+            query,
+            clean_titles,
+            scorer=fuzz.token_set_ratio,
+            score_cutoff=score_cutoff,
+            limit=limit
+        )
+
+        if not matches:
+            full_strings = [f"{c['clean_title']} {c['clean_author']}".strip() for c in candidates]
+            matches = await asyncio.to_thread(
+                process.extract,
+                query,
+                full_strings,
+                scorer=fuzz.token_set_ratio,
+                score_cutoff=score_cutoff,
+                limit=limit
+            )
+
+        matched_books = [candidates[idx] for _, score, idx in matches]
+        return matched_books, len(matched_books)
+
+
 async def _sqlite_get_book_by_id(book_id: int) -> Optional[Dict[str, Any]]:
     async with get_connection() as conn:
         book_cursor = await conn.execute(
@@ -258,7 +379,7 @@ async def _sqlite_get_book_by_id(book_id: int) -> Optional[Dict[str, Any]]:
 
         files_cursor = await conn.execute(
             """
-            SELECT id, format, file_id, file_size, file_name, duration
+            SELECT id, format, file_id, file_unique_id, channel_message_id, file_size, file_name, duration
             FROM book_files
             WHERE book_id = ?
             ORDER BY format ASC
@@ -272,6 +393,8 @@ async def _sqlite_get_book_by_id(book_id: int) -> Optional[Dict[str, Any]]:
                 "id": f["id"],
                 "format": f["format"],
                 "file_id": f["file_id"],
+                "file_unique_id": f["file_unique_id"],
+                "channel_message_id": f["channel_message_id"],
                 "file_size": f["file_size"],
                 "file_name": f["file_name"],
                 "duration": f["duration"]
@@ -374,7 +497,6 @@ async def _pg_init_db() -> None:
     """Initializes PostgreSQL tables, pg_trgm extension, and tsvector indices."""
     pool = await get_pg_pool()
     async with pool.acquire() as conn:
-        # Try enabling pg_trgm extension if permissions allow
         has_trgm = False
         try:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm;")
@@ -407,12 +529,21 @@ async def _pg_init_db() -> None:
                 book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
                 format TEXT NOT NULL,
                 file_id TEXT NOT NULL UNIQUE,
+                file_unique_id TEXT,
+                channel_message_id INTEGER,
                 file_size BIGINT,
                 file_name TEXT,
                 duration INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+
+        # Migration columns
+        try:
+            await conn.execute("ALTER TABLE book_files ADD COLUMN IF NOT EXISTS channel_message_id INTEGER;")
+            await conn.execute("ALTER TABLE book_files ADD COLUMN IF NOT EXISTS file_unique_id TEXT;")
+        except Exception as e:
+            logger.debug(f"PostgreSQL column migration note: {e}")
 
         # Users table
         await conn.execute("""
@@ -428,6 +559,8 @@ async def _pg_init_db() -> None:
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_books_canonical ON books(canonical_title, canonical_author);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_book_id ON book_files(book_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_format ON book_files(book_id, format);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_msg_id ON book_files(channel_message_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_unique_id ON book_files(file_unique_id);")
 
         # Full-Text Search tsvector index
         await conn.execute("""
@@ -455,7 +588,11 @@ async def _pg_upsert_book_and_file(
     file_id: str,
     file_size: Optional[int] = None,
     file_name: Optional[str] = None,
-    duration: Optional[int] = None
+    duration: Optional[int] = None,
+    channel_message_id: Optional[int] = None,
+    file_unique_id: Optional[str] = None,
+    cover_url: Optional[str] = None,
+    description: Optional[str] = None
 ) -> Tuple[int, bool, bool]:
     pool = await get_pg_pool()
     async with pool.acquire() as conn:
@@ -472,15 +609,25 @@ async def _pg_upsert_book_and_file(
         is_new_book = False
         if row:
             book_id = row["id"]
+            if cover_url or description:
+                await conn.execute(
+                    """
+                    UPDATE books
+                    SET cover_url = COALESCE(cover_url, $1),
+                        description = COALESCE(description, $2)
+                    WHERE id = $3
+                    """,
+                    cover_url, description, book_id
+                )
         else:
             insert_row = await conn.fetchrow(
                 """
-                INSERT INTO books (clean_title, clean_author, canonical_title, canonical_author)
-                VALUES ($1, $2, $3, $4)
+                INSERT INTO books (clean_title, clean_author, canonical_title, canonical_author, cover_url, description)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 ON CONFLICT (clean_title, clean_author) DO NOTHING
                 RETURNING id
                 """,
-                clean_title, clean_author, canonical_title, canonical_author
+                clean_title, clean_author, canonical_title, canonical_author, cover_url, description
             )
             if insert_row:
                 book_id = insert_row["id"]
@@ -492,17 +639,38 @@ async def _pg_upsert_book_and_file(
                 )
                 book_id = existing["id"]
 
-        # Insert or ignore file
-        file_row = await conn.fetchrow(
-            """
-            INSERT INTO book_files (book_id, format, file_id, file_size, file_name, duration)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (file_id) DO NOTHING
-            RETURNING id
-            """,
-            book_id, format_type, file_id, file_size, file_name, duration
-        )
-        is_new_file = file_row is not None
+        # Check if file already exists
+        existing_file = None
+        if file_id:
+            existing_file = await conn.fetchrow("SELECT id FROM book_files WHERE file_id = $1", file_id)
+        if not existing_file and file_unique_id:
+            existing_file = await conn.fetchrow("SELECT id FROM book_files WHERE file_unique_id = $1", file_unique_id)
+        if not existing_file and channel_message_id:
+            existing_file = await conn.fetchrow("SELECT id FROM book_files WHERE channel_message_id = $1", channel_message_id)
+
+        is_new_file = False
+        if existing_file:
+            if channel_message_id or file_unique_id:
+                await conn.execute(
+                    """
+                    UPDATE book_files
+                    SET channel_message_id = COALESCE(channel_message_id, $1),
+                        file_unique_id = COALESCE(file_unique_id, $2)
+                    WHERE id = $3
+                    """,
+                    channel_message_id, file_unique_id, existing_file["id"]
+                )
+        else:
+            file_row = await conn.fetchrow(
+                """
+                INSERT INTO book_files (book_id, format, file_id, file_unique_id, channel_message_id, file_size, file_name, duration)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (file_id) DO NOTHING
+                RETURNING id
+                """,
+                book_id, format_type, file_id, file_unique_id, channel_message_id, file_size, file_name, duration
+            )
+            is_new_file = file_row is not None
 
         return book_id, is_new_book, is_new_file
 
@@ -625,6 +793,71 @@ async def _pg_search_books(query: str, limit: int = 5, offset: int = 0) -> Tuple
         return results, total
 
 
+async def _pg_fuzzy_search_books(query: str, limit: int = 5, score_cutoff: float = 65.0) -> Tuple[List[Dict[str, Any]], int]:
+    try:
+        from rapidfuzz import process, fuzz
+    except ImportError:
+        return [], 0
+
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT b.id, b.clean_title, b.clean_author, b.cover_url, b.description,
+                   b.rating, b.genres, b.year,
+                   STRING_AGG(DISTINCT f.format, ',') as formats
+            FROM books b
+            LEFT JOIN book_files f ON f.book_id = b.id
+            GROUP BY b.id
+            ORDER BY b.id DESC
+            LIMIT 500
+            """
+        )
+        if not rows:
+            return [], 0
+
+        candidates = []
+        clean_titles = []
+        for r in rows:
+            formats_str = r["formats"] or ""
+            formats_list = [fmt.strip() for fmt in formats_str.split(",") if fmt.strip()]
+            candidates.append({
+                "id": r["id"],
+                "clean_title": r["clean_title"],
+                "clean_author": r["clean_author"],
+                "cover_url": r["cover_url"],
+                "description": r["description"],
+                "rating": r["rating"],
+                "genres": r["genres"],
+                "year": r["year"],
+                "formats": formats_list,
+            })
+            clean_titles.append(r["clean_title"])
+
+        matches = await asyncio.to_thread(
+            process.extract,
+            query,
+            clean_titles,
+            scorer=fuzz.token_set_ratio,
+            score_cutoff=score_cutoff,
+            limit=limit
+        )
+
+        if not matches:
+            full_strings = [f"{c['clean_title']} {c['clean_author']}".strip() for c in candidates]
+            matches = await asyncio.to_thread(
+                process.extract,
+                query,
+                full_strings,
+                scorer=fuzz.token_set_ratio,
+                score_cutoff=score_cutoff,
+                limit=limit
+            )
+
+        matched_books = [candidates[idx] for _, score, idx in matches]
+        return matched_books, len(matched_books)
+
+
 async def _pg_get_book_by_id(book_id: int) -> Optional[Dict[str, Any]]:
     pool = await get_pg_pool()
     async with pool.acquire() as conn:
@@ -634,7 +867,7 @@ async def _pg_get_book_by_id(book_id: int) -> Optional[Dict[str, Any]]:
 
         files = await conn.fetch(
             """
-            SELECT id, format, file_id, file_size, file_name, duration
+            SELECT id, format, file_id, file_unique_id, channel_message_id, file_size, file_name, duration
             FROM book_files
             WHERE book_id = $1
             ORDER BY format ASC
@@ -647,6 +880,8 @@ async def _pg_get_book_by_id(book_id: int) -> Optional[Dict[str, Any]]:
                 "id": f["id"],
                 "format": f["format"],
                 "file_id": f["file_id"],
+                "file_unique_id": f["file_unique_id"],
+                "channel_message_id": f["channel_message_id"],
                 "file_size": f["file_size"],
                 "file_name": f["file_name"],
                 "duration": f["duration"]
@@ -747,6 +982,48 @@ async def init_db() -> None:
         await _sqlite_init_db()
 
 
+async def is_file_indexed(
+    channel_message_id: Optional[int] = None,
+    file_unique_id: Optional[str] = None,
+    file_id: Optional[str] = None
+) -> bool:
+    """Checks if a file has already been ingested via message ID, unique ID, or file ID."""
+    if not channel_message_id and not file_unique_id and not file_id:
+        return False
+
+    if is_postgres():
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            if channel_message_id:
+                row = await conn.fetchrow("SELECT id FROM book_files WHERE channel_message_id = $1 LIMIT 1", channel_message_id)
+                if row:
+                    return True
+            if file_unique_id:
+                row = await conn.fetchrow("SELECT id FROM book_files WHERE file_unique_id = $1 LIMIT 1", file_unique_id)
+                if row:
+                    return True
+            if file_id:
+                row = await conn.fetchrow("SELECT id FROM book_files WHERE file_id = $1 LIMIT 1", file_id)
+                if row:
+                    return True
+            return False
+    else:
+        async with get_connection() as conn:
+            if channel_message_id:
+                cur = await conn.execute("SELECT id FROM book_files WHERE channel_message_id = ? LIMIT 1", (channel_message_id,))
+                if await cur.fetchone():
+                    return True
+            if file_unique_id:
+                cur = await conn.execute("SELECT id FROM book_files WHERE file_unique_id = ? LIMIT 1", (file_unique_id,))
+                if await cur.fetchone():
+                    return True
+            if file_id:
+                cur = await conn.execute("SELECT id FROM book_files WHERE file_id = ? LIMIT 1", (file_id,))
+                if await cur.fetchone():
+                    return True
+            return False
+
+
 async def upsert_book_and_file(
     clean_title: str,
     clean_author: str,
@@ -756,18 +1033,27 @@ async def upsert_book_and_file(
     file_id: str,
     file_size: Optional[int] = None,
     file_name: Optional[str] = None,
-    duration: Optional[int] = None
+    duration: Optional[int] = None,
+    channel_message_id: Optional[int] = None,
+    file_unique_id: Optional[str] = None,
+    cover_url: Optional[str] = None,
+    description: Optional[str] = None,
+    **kwargs: Any
 ) -> Tuple[int, bool, bool]:
-    """Inserts or matches a book and attaches the media format. Returns: (book_id, is_new_book, is_new_file)."""
+    """Inserts or matches a book and attaches media format. Returns: (book_id, is_new_book, is_new_file)."""
     if is_postgres():
         return await _pg_upsert_book_and_file(
             clean_title, clean_author, canonical_title, canonical_author,
-            format_type, file_id, file_size, file_name, duration
+            format_type, file_id, file_size, file_name, duration,
+            channel_message_id, file_unique_id,
+            cover_url=cover_url, description=description
         )
     else:
         return await _sqlite_upsert_book_and_file(
             clean_title, clean_author, canonical_title, canonical_author,
-            format_type, file_id, file_size, file_name, duration
+            format_type, file_id, file_size, file_name, duration,
+            channel_message_id, file_unique_id,
+            cover_url=cover_url, description=description
         )
 
 
@@ -787,11 +1073,22 @@ async def update_book_metadata(
 
 
 async def search_books(query: str, limit: int = 5, offset: int = 0) -> Tuple[List[Dict[str, Any]], int]:
-    """Searches books using full-text search index. Returns (results_list, total_count)."""
+    """
+    Searches books using full-text search index as primary.
+    If 0 results are found on first page, falls back seamlessly to fuzzy search.
+    """
     if is_postgres():
-        return await _pg_search_books(query, limit, offset)
+        results, total = await _pg_search_books(query, limit, offset)
+        if total == 0 and offset == 0:
+            logger.info(f"PostgreSQL search returned 0 results for '{query}'. Running fuzzy search fallback...")
+            results, total = await _pg_fuzzy_search_books(query, limit=limit, score_cutoff=65.0)
+        return results, total
     else:
-        return await _sqlite_search_books(query, limit, offset)
+        results, total = await _sqlite_search_books(query, limit, offset)
+        if total == 0 and offset == 0:
+            logger.info(f"SQLite FTS5 returned 0 results for '{query}'. Running fuzzy search fallback...")
+            results, total = await _sqlite_fuzzy_search_books(query, limit=limit, score_cutoff=65.0)
+        return results, total
 
 
 async def get_book_by_id(book_id: int) -> Optional[Dict[str, Any]]:
@@ -832,3 +1129,199 @@ async def get_stats() -> Dict[str, Any]:
         return await _pg_get_stats()
     else:
         return await _sqlite_get_stats()
+
+
+async def get_indexed_message_ids() -> set:
+    """Returns a set of all channel_message_ids already indexed in the database."""
+    if is_postgres():
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT channel_message_id FROM book_files WHERE channel_message_id IS NOT NULL")
+            return {r["channel_message_id"] for r in rows}
+    else:
+        async with get_connection() as conn:
+            cursor = await conn.execute("SELECT channel_message_id FROM book_files WHERE channel_message_id IS NOT NULL")
+            rows = await cursor.fetchall()
+            return {r["channel_message_id"] for r in rows}
+
+
+async def batch_upsert_books_and_files(items: List[Dict[str, Any]]) -> Tuple[int, int]:
+    """
+    Inserts a batch of books and files within a single database transaction.
+    Returns: (new_books_count, new_files_count)
+    """
+    if not items:
+        return 0, 0
+
+    if is_postgres():
+        new_books_count = 0
+        new_files_count = 0
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for item in items:
+                    canonical_title = item["canonical_title"]
+                    canonical_author = item["canonical_author"]
+                    clean_title = item["clean_title"]
+                    clean_author = item["clean_author"]
+                    format_type = item["format_type"]
+                    file_id = item["file_id"]
+                    file_size = item.get("file_size")
+                    file_name = item.get("file_name")
+                    duration = item.get("duration")
+                    channel_message_id = item.get("channel_message_id")
+                    file_unique_id = item.get("file_unique_id")
+
+                    row = await conn.fetchrow(
+                        """
+                        SELECT id FROM books
+                        WHERE (canonical_title = $1 AND canonical_author = $2)
+                           OR (clean_title = $3 AND clean_author = $4)
+                        LIMIT 1
+                        """,
+                        canonical_title, canonical_author, clean_title, clean_author
+                    )
+                    if row:
+                        book_id = row["id"]
+                    else:
+                        insert_row = await conn.fetchrow(
+                            """
+                            INSERT INTO books (clean_title, clean_author, canonical_title, canonical_author)
+                            VALUES ($1, $2, $3, $4)
+                            ON CONFLICT (clean_title, clean_author) DO NOTHING
+                            RETURNING id
+                            """,
+                            clean_title, clean_author, canonical_title, canonical_author
+                        )
+                        if insert_row:
+                            book_id = insert_row["id"]
+                            new_books_count += 1
+                        else:
+                            existing = await conn.fetchrow(
+                                "SELECT id FROM books WHERE clean_title = $1 AND clean_author = $2",
+                                clean_title, clean_author
+                            )
+                            book_id = existing["id"]
+
+                    existing_file = None
+                    if file_id:
+                        existing_file = await conn.fetchrow("SELECT id FROM book_files WHERE file_id = $1", file_id)
+                    if not existing_file and file_unique_id:
+                        existing_file = await conn.fetchrow("SELECT id FROM book_files WHERE file_unique_id = $1", file_unique_id)
+                    if not existing_file and channel_message_id:
+                        existing_file = await conn.fetchrow("SELECT id FROM book_files WHERE channel_message_id = $1", channel_message_id)
+
+                    if existing_file:
+                        if channel_message_id or file_unique_id:
+                            await conn.execute(
+                                """
+                                UPDATE book_files
+                                SET channel_message_id = COALESCE(channel_message_id, $1),
+                                    file_unique_id = COALESCE(file_unique_id, $2)
+                                WHERE id = $3
+                                """,
+                                channel_message_id, file_unique_id, existing_file["id"]
+                            )
+                    else:
+                        file_row = await conn.fetchrow(
+                            """
+                            INSERT INTO book_files (book_id, format, file_id, file_unique_id, channel_message_id, file_size, file_name, duration)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                            ON CONFLICT (file_id) DO NOTHING
+                            RETURNING id
+                            """,
+                            book_id, format_type, file_id, file_unique_id, channel_message_id, file_size, file_name, duration
+                        )
+                        if file_row:
+                            new_files_count += 1
+        return new_books_count, new_files_count
+    else:
+        new_books_count = 0
+        new_files_count = 0
+        async with get_connection() as conn:
+            for item in items:
+                canonical_title = item["canonical_title"]
+                canonical_author = item["canonical_author"]
+                clean_title = item["clean_title"]
+                clean_author = item["clean_author"]
+                format_type = item["format_type"]
+                file_id = item["file_id"]
+                file_size = item.get("file_size")
+                file_name = item.get("file_name")
+                duration = item.get("duration")
+                channel_message_id = item.get("channel_message_id")
+                file_unique_id = item.get("file_unique_id")
+
+                cursor = await conn.execute(
+                    """
+                    SELECT id FROM books
+                    WHERE (canonical_title = ? AND canonical_author = ?)
+                       OR (clean_title = ? AND clean_author = ?)
+                    LIMIT 1
+                    """,
+                    (canonical_title, canonical_author, clean_title, clean_author)
+                )
+                row = await cursor.fetchone()
+                if row:
+                    book_id = row["id"]
+                else:
+                    try:
+                        cursor = await conn.execute(
+                            """
+                            INSERT INTO books (clean_title, clean_author, canonical_title, canonical_author)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            (clean_title, clean_author, canonical_title, canonical_author)
+                        )
+                        book_id = cursor.lastrowid
+                        new_books_count += 1
+                    except aiosqlite.IntegrityError:
+                        cursor = await conn.execute(
+                            "SELECT id FROM books WHERE clean_title = ? AND clean_author = ?",
+                            (clean_title, clean_author)
+                        )
+                        existing = await cursor.fetchone()
+                        book_id = existing["id"]
+
+                existing_file = None
+                if file_id:
+                    f_cur = await conn.execute("SELECT id FROM book_files WHERE file_id = ?", (file_id,))
+                    existing_file = await f_cur.fetchone()
+                if not existing_file and file_unique_id:
+                    f_cur = await conn.execute("SELECT id FROM book_files WHERE file_unique_id = ?", (file_unique_id,))
+                    existing_file = await f_cur.fetchone()
+                if not existing_file and channel_message_id:
+                    f_cur = await conn.execute("SELECT id FROM book_files WHERE channel_message_id = ?", (channel_message_id,))
+                    existing_file = await f_cur.fetchone()
+
+                if existing_file:
+                    if channel_message_id or file_unique_id:
+                        await conn.execute(
+                            """
+                            UPDATE book_files
+                            SET channel_message_id = COALESCE(channel_message_id, ?),
+                                file_unique_id = COALESCE(file_unique_id, ?)
+                            WHERE id = ?
+                            """,
+                            (channel_message_id, file_unique_id, existing_file["id"])
+                        )
+                else:
+                    try:
+                        await conn.execute(
+                            """
+                            INSERT INTO book_files (book_id, format, file_id, file_unique_id, channel_message_id, file_size, file_name, duration)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (book_id, format_type, file_id, file_unique_id, channel_message_id, file_size, file_name, duration)
+                        )
+                        new_files_count += 1
+                    except aiosqlite.IntegrityError:
+                        pass
+
+            await conn.commit()
+        return new_books_count, new_files_count
+
+
+# Alias for compatibility with backfill and external modules
+insert_or_update_book = upsert_book_and_file
+

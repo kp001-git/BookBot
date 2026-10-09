@@ -11,20 +11,54 @@ logger = logging.getLogger(__name__)
 router = Router(name="channel_router")
 
 
-@router.channel_post(F.chat.id == settings.STORAGE_CHANNEL_ID)
+def is_storage_channel(chat_id: int | str) -> bool:
+    """Validates STORAGE_CHANNEL_ID flexibly (string comparison, int casting, and -100 prefix tolerance)."""
+    target = settings.STORAGE_CHANNEL_ID
+    if target is None:
+        return False
+    c_str = str(chat_id).strip()
+    t_str = str(target).strip()
+    if c_str == t_str:
+        return True
+    try:
+        if int(c_str) == int(t_str):
+            return True
+    except (ValueError, TypeError):
+        pass
+    c_norm = c_str.removeprefix("-100").removeprefix("-")
+    t_norm = t_str.removeprefix("-100").removeprefix("-")
+    return bool(c_norm and c_norm == t_norm)
+
+
+@router.channel_post()
+@router.edited_channel_post()
 async def handle_storage_channel_post(message: Message, bot: Bot) -> None:
     """Listens to channel posts in STORAGE_CHANNEL_ID, sanitizes metadata, and triggers enrichment & broadcast."""
+    logger.info(
+        f"Incoming channel post from chat ID: {message.chat.id}, "
+        f"has_audio: {bool(message.audio)}, has_document: {bool(message.document)}"
+    )
+
+    if not is_storage_channel(message.chat.id):
+        logger.warning(
+            f"Ignored channel post: chat ID {message.chat.id} does not match configured "
+            f"STORAGE_CHANNEL_ID ({settings.STORAGE_CHANNEL_ID})."
+        )
+        return
+
     is_audio = message.audio is not None
     is_doc = message.document is not None
 
     if not is_audio and not is_doc:
-        logger.debug("Ignored post: neither audio nor document.")
+        logger.debug(f"Ignored post in storage channel {message.chat.id}: neither audio nor document.")
         return
 
     # Extract raw attributes
+    file_unique_id = None
     if is_audio:
         audio = message.audio
         file_id = audio.file_id
+        file_unique_id = getattr(audio, "file_unique_id", None)
         file_name = audio.file_name
         file_size = audio.file_size
         mime_type = audio.mime_type
@@ -34,6 +68,7 @@ async def handle_storage_channel_post(message: Message, bot: Bot) -> None:
     else:
         doc = message.document
         file_id = doc.file_id
+        file_unique_id = getattr(doc, "file_unique_id", None)
         file_name = doc.file_name
         file_size = doc.file_size
         mime_type = doc.mime_type
@@ -68,12 +103,19 @@ async def handle_storage_channel_post(message: Message, bot: Bot) -> None:
         file_id=file_id,
         file_size=file_size,
         file_name=parsed.file_name,
-        duration=duration
+        duration=duration,
+        channel_message_id=message.message_id,
+        file_unique_id=file_unique_id
     )
 
     if not is_new_file:
         logger.info(f"File '{file_id}' already indexed for book ID {book_id}.")
         return
+
+    logger.info(
+        f"Committed to database: book_id={book_id}, is_new_book={is_new_book}, "
+        f"is_new_file={is_new_file}, title='{parsed.clean_title}'"
+    )
 
     # Enrichment pipeline (for new books or whenever indexed)
     cover_url = None

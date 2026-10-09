@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     DATABASE_URL: Optional[str] = None
     DB_PATH: str = "data/library.db"
     BOT_USERNAME: Optional[str] = None
+    TELEGRAM_API_ID: Optional[int] = None
+    TELEGRAM_API_HASH: Optional[str] = None
+    TELEGRAM_PHONE: Optional[str] = None
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -63,5 +66,22 @@ class Settings(BaseSettings):
         clean = str(v).strip()
         return clean if clean else None
 
+    @field_validator("TELEGRAM_API_ID", mode="before")
+    @classmethod
+    def parse_api_id(cls, v: Optional[Union[str, int]]) -> Optional[int]:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        return int(v)
+
+    @field_validator("TELEGRAM_API_HASH", mode="before")
+    @classmethod
+    def parse_api_hash(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        clean = str(v).strip()
+        return clean if clean else None
+
 
 settings = Settings()
+# Export alias config for compatibility
+config = settings
