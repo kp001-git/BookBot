@@ -279,16 +279,9 @@ async def handle_start(message: Message, command: CommandObject) -> None:
         "• Send any title or author name directly in this chat.\n"
         "• Or use inline mode anywhere by typing <code>@AudioSoulBot title</code>.\n\n"
         "⚡ All files are delivered instantly in native formats (Audiobooks, EPUB, PDF)!\n\n"
-        '👨‍💻 Developed by <a href="https://t.me/souldumpp">Soul</a>'
+        "👨‍💻 Developed by @souldumpp"
     )
-    welcome_markup = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Developer", url="https://t.me/souldumpp")
-            ]
-        ]
-    )
-    await message.answer(welcome_text, parse_mode="HTML", reply_markup=welcome_markup)
+    await message.answer(welcome_text, parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message(Command("help"))
@@ -306,16 +299,9 @@ async def handle_help(message: Message) -> None:
         "• <b>Audiobooks:</b> Native `.m4b` / `.mp3` files & multi-track `.zip` archives\n"
         "• <b>EPUBs:</b> Optimized digital books for e-readers & mobile\n"
         "• <b>PDFs:</b> Documents and illustrated editions\n\n"
-        '👨‍💻 Developed by <a href="https://t.me/souldumpp">Soul</a>'
+        "👨‍💻 Developed by @souldumpp"
     )
-    help_markup = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Developer", url="https://t.me/souldumpp")
-            ]
-        ]
-    )
-    await message.answer(help_text, parse_mode="HTML", reply_markup=help_markup)
+    await message.answer(help_text, parse_mode="HTML", disable_web_page_preview=True)
 
 
 @router.message(F.text & ~F.text.startswith("/"))

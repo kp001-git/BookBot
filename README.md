@@ -36,8 +36,8 @@ The bot automatically indexes multimedia files (Audiobooks, EPUBs, PDFs, ZIP arc
    - `/stats` command restricted to `ADMIN_IDS` with total indexed books, format breakdown, total users, total file deliveries served, active database engine (`PostgreSQL` or `SQLite FTS5`), and uptime duration.
    - `/backup` command for instant SQLite database snapshot export.
 
-7. **Attribution & Support Backlinks:**
-   - Persistent developer attribution footer and inline keyboard button linking directly to [Soul](https://t.me/souldumpp).
+7. **Attribution & Support:**
+   - Clean developer attribution footer mentioning `@souldumpp` without link previews or extra buttons.
 
 ---
 

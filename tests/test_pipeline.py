@@ -352,12 +352,10 @@ class TestPipeline(unittest.TestCase):
             text = args[0]
             markup = kwargs.get("reply_markup")
 
-            self.assertIn("https://t.me/souldumpp", text)
-            self.assertIn("Soul", text)
-            self.assertIsNotNone(markup)
-            button = markup.inline_keyboard[0][0]
-            self.assertEqual(button.url, "https://t.me/souldumpp")
-            self.assertEqual(button.text, "Developer")
+            self.assertIn("@souldumpp", text)
+            self.assertNotIn("https://t.me/souldumpp", text)
+            self.assertIsNone(markup)
+            self.assertTrue(kwargs.get("disable_web_page_preview"))
 
             # Test /start welcome message and button
             msg_start = MagicMock()
@@ -373,12 +371,10 @@ class TestPipeline(unittest.TestCase):
             text_s = args_s[0]
             markup_s = kwargs_s.get("reply_markup")
 
-            self.assertIn("https://t.me/souldumpp", text_s)
-            self.assertIn("Soul", text_s)
-            self.assertIsNotNone(markup_s)
-            button_s = markup_s.inline_keyboard[0][0]
-            self.assertEqual(button_s.url, "https://t.me/souldumpp")
-            self.assertEqual(button_s.text, "Developer")
+            self.assertIn("@souldumpp", text_s)
+            self.assertNotIn("https://t.me/souldumpp", text_s)
+            self.assertIsNone(markup_s)
+            self.assertTrue(kwargs_s.get("disable_web_page_preview"))
 
         asyncio.run(run_attribution_test())
 
