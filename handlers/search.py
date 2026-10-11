@@ -388,7 +388,7 @@ async def handle_book_detail_callback(callback: CallbackQuery, bot: Bot) -> None
     user_id = callback.from_user.id
     is_sub, unsub = await check_user_subscription(bot, user_id)
     if not is_sub:
-        await callback.answer("🔒 Subscription required.", show_alert=False)
+        await callback.answer("Please join our channel to support us first ❤️", show_alert=False)
         gate_msg = get_subscription_gate_message(unsub)
         markup = build_subscription_markup(f"book:{book_id}")
         if callback.message:
@@ -528,7 +528,7 @@ async def handle_download_callback(callback: CallbackQuery, bot: Bot) -> None:
     # Gatekeeper check
     is_sub, unsub = await check_user_subscription(bot, user_id)
     if not is_sub:
-        await callback.answer("🔒 Subscription required to download.", show_alert=False)
+        await callback.answer("Please join our channel to support us first ❤️", show_alert=False)
         gate_msg = get_subscription_gate_message(unsub)
         markup = build_subscription_markup(f"dl:{file_row_id}")
         if callback.message:

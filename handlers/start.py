@@ -31,12 +31,12 @@ logger = logging.getLogger(__name__)
 router = Router(name="start_router")
 
 WELCOME_TEXT = (
-    "📚 <b>Welcome to the Digital Library & Audiobook Indexer!</b>\n\n"
+    "👋 <b>Welcome to the Digital Library & Audiobook Bot!</b> 📚✨\n\n"
     "🔍 <b>How to Search:</b>\n"
-    "• Send any title or author name directly in this chat.\n"
-    "• Or use inline mode anywhere by typing <code>@AudioSoulBot title</code>.\n\n"
+    "• Send any book title or author name directly in this chat.\n"
+    "• Or type <code>@AudioSoulBot title</code> in any chat for quick inline search.\n\n"
     "⚡ All files are delivered instantly in native formats (Audiobooks, EPUB, PDF)!\n\n"
-    "👨‍💻 Developed by @souldumpp"
+    "👨‍💻 Maintained with ❤️ by @souldumpp"
 )
 
 
@@ -123,14 +123,14 @@ async def handle_verify_subscription(callback: CallbackQuery, bot: Bot) -> None:
     is_subscribed, unsubscribed = await check_user_subscription(bot, user.id)
 
     if not is_subscribed:
-        unsub_names = ", ".join(unsubscribed)
+        unsub_names = ", ".join(unsubscribed) or "@souldumpp"
         await callback.answer(
-            f"⚠️ You have not joined all required channels yet!\nPlease join: {unsub_names} and tap Verify again.",
+            f"Please join {unsub_names} first to support the project, then tap continue! ❤️",
             show_alert=True
         )
         return
 
-    await callback.answer("✅ Membership verified! Loading your request...")
+    await callback.answer("Thank you for your support! ❤️ Loading your request...")
 
     # Extract pending action/payload preserved in callback data
     cb_data = callback.data or ""

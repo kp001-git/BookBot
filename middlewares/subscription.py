@@ -94,23 +94,23 @@ def build_subscription_markup(pending_payload: str = "") -> InlineKeyboardMarkup
         cb_data = cb_data[:64]
 
     buttons.append([
-        InlineKeyboardButton(text="🔄 Verify Membership", callback_data=cb_data)
+        InlineKeyboardButton(text="✨ I've Joined — Continue", callback_data=cb_data)
     ])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def get_subscription_gate_message(unsubscribed_channels: Optional[List[str]] = None) -> str:
-    """Renders a rich, attractive message explaining force-subscription requirements."""
+    """Renders a gentle and welcoming request asking the user to join the channel to support the developer."""
     channels = unsubscribed_channels or settings.REQUIRED_CHANNELS
-    ch_list_str = "\n".join([f"  • <b>{ch}</b>" for ch in channels])
+    ch_list_str = "\n".join([f"  👉 <b>{ch}</b>" for ch in channels])
 
     return (
-        "🔒 <b>Access Restricted: Channel Subscription Required</b>\n\n"
-        "To enjoy unlimited free audiobooks, EPUBs, and PDFs from our library, "
-        "please join our official community channels:\n\n"
+        "👋 <b>Welcome to the Digital Library!</b> 🎧📚\n\n"
+        "To support the developer and keep all audiobooks & books free for everyone, "
+        "please join our channel before getting started:\n\n"
         f"{ch_list_str}\n\n"
-        "✨ <i>After joining, tap <b>🔄 Verify Membership</b> below to instantly unlock your book!</i>"
+        "After joining, tap <b>✨ I've Joined — Continue</b> below to unlock the bot! ❤️"
     )
 
 
@@ -178,7 +178,7 @@ class SubscriptionMiddleware(BaseMiddleware):
                     parts = cb_data.split(":")
                     payload = f"book:{parts[1]}"
 
-                await event.answer("🔒 Subscription required to access this file.", show_alert=False)
+                await event.answer("Please join our channel to support us first ❤️", show_alert=False)
                 gate_msg = get_subscription_gate_message(unsubscribed)
                 markup = build_subscription_markup(payload)
                 if event.message:

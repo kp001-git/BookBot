@@ -31,7 +31,7 @@ class TestPhase2AudienceGrowth(unittest.IsolatedAsyncioTestCase):
             BOT_TOKEN="1234:dummy",
             STORAGE_CHANNEL_ID=-100123
         )
-        self.assertEqual(s_default.REQUIRED_CHANNELS, ["@souldumpp", "@Liora_BookHouse"])
+        self.assertEqual(s_default.REQUIRED_CHANNELS, ["@souldumpp"])
 
         # 2. Comma-separated override
         s_custom = Settings(
@@ -109,18 +109,16 @@ class TestPhase2AudienceGrowth(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(unsub, ["@ch1", "@ch2"])
 
     def test_build_subscription_markup(self):
-        with patch.object(settings, "REQUIRED_CHANNELS", ["@souldumpp", "@Liora_BookHouse"]):
+        with patch.object(settings, "REQUIRED_CHANNELS", ["@souldumpp"]):
             markup = build_subscription_markup("book:42")
             buttons = [b for row in markup.inline_keyboard for b in row]
 
-            # Should have buttons for each channel and verify button
-            self.assertEqual(len(buttons), 3)
+            # Should have button for @souldumpp and continue button
+            self.assertEqual(len(buttons), 2)
             self.assertEqual(buttons[0].text, "📢 Join @souldumpp")
             self.assertEqual(buttons[0].url, "https://t.me/souldumpp")
-            self.assertEqual(buttons[1].text, "📢 Join @Liora_BookHouse")
-            self.assertEqual(buttons[1].url, "https://t.me/Liora_BookHouse")
-            self.assertEqual(buttons[2].text, "🔄 Verify Membership")
-            self.assertEqual(buttons[2].callback_data, "verify_sub:book:42")
+            self.assertEqual(buttons[1].text, "✨ I've Joined — Continue")
+            self.assertEqual(buttons[1].callback_data, "verify_sub:book:42")
 
     def test_share_link_in_render_book_card(self):
         sample_book = {
@@ -160,8 +158,8 @@ class TestPhase2AudienceGrowth(unittest.IsolatedAsyncioTestCase):
             text = args[0]
             markup: InlineKeyboardMarkup = kwargs["reply_markup"]
 
-            self.assertIn("Subscription Required", text)
-            verify_btn = next(b for row in markup.inline_keyboard for b in row if "Verify" in b.text)
+            self.assertIn("@souldumpp", text)
+            verify_btn = next(b for row in markup.inline_keyboard for b in row if "Joined" in b.text or "Continue" in b.text)
             self.assertEqual(verify_btn.callback_data, "verify_sub:book:42")
 
     async def test_deep_link_start_subscribed_delivers_book(self):
