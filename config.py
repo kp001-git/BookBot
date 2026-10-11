@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     ADMIN_IDS: Union[List[int], str] = []
     STORAGE_CHANNEL_ID: int
     UPDATES_CHANNEL_ID: Optional[int] = None
+    REQUIRED_CHANNELS: Union[List[str], str] = ["@souldumpp", "@Liora_BookHouse"]
     DATABASE_URL: Optional[str] = None
     DB_PATH: str = "data/library.db"
     BOT_USERNAME: Optional[str] = None
@@ -21,6 +22,22 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore"
     )
+
+    @field_validator("REQUIRED_CHANNELS", mode="before")
+    @classmethod
+    def parse_required_channels(cls, v: Union[str, List[str], None]) -> List[str]:
+        if v is None:
+            return ["@souldumpp", "@Liora_BookHouse"]
+        if isinstance(v, list):
+            res = [str(x).strip() for x in v if str(x).strip()]
+            return res if res else ["@souldumpp", "@Liora_BookHouse"]
+        if isinstance(v, str):
+            clean = v.strip()
+            if not clean:
+                return ["@souldumpp", "@Liora_BookHouse"]
+            items = [item.strip() for item in clean.split(",") if item.strip()]
+            return items if items else ["@souldumpp", "@Liora_BookHouse"]
+        return ["@souldumpp", "@Liora_BookHouse"]
 
     @field_validator("ADMIN_IDS", mode="before")
     @classmethod

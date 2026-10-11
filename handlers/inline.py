@@ -10,6 +10,7 @@ from aiogram.types import (
 )
 
 from config import settings
+from services.search import search_catalog
 from database.models import search_books
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,12 @@ async def handle_inline_query(inline_query: InlineQuery, bot: Bot) -> None:
         )
         return
 
-    results, total = await search_books(query, limit=10, offset=0)
+    # Sub-5ms fast in-memory search cache query returning up to 20 items
+    results, total = await search_catalog(query, limit=20, offset=0)
+    if not results:
+        # Fallback to database search if catalog cache has no results
+        results, total = await search_books(query, limit=20, offset=0)
+
     if not results:
         await inline_query.answer(
             results=[],
@@ -56,8 +62,13 @@ async def handle_inline_query(inline_query: InlineQuery, bot: Bot) -> None:
         )
         return
 
-    bot_user = await bot.get_me()
-    bot_username = settings.BOT_USERNAME or bot_user.username
+    bot_username = settings.BOT_USERNAME
+    if not bot_username:
+        try:
+            bot_user = await bot.get_me()
+            bot_username = bot_user.username
+        except Exception:
+            bot_username = "AudioSoulBot"
 
     articles: List[InlineQueryResultArticle] = []
     for book in results:

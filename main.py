@@ -22,6 +22,7 @@ from database.models import init_db
 from database.backup import send_database_backup, sqlite_backup_worker
 from services.search import preload_catalog
 from handlers.channel import router as channel_router
+from handlers.start import router as start_router
 from handlers.search import router as search_router
 from handlers.inline import router as inline_router
 from handlers.admin import router as admin_router
@@ -93,9 +94,10 @@ async def main() -> None:
     dp = Dispatcher()
 
     # Register Routers
-    # Note: Order matters. Channel posts & Admin commands first, then search & inline.
+    # Note: Order matters. Channel posts & Admin commands first, then start, search & inline.
     dp.include_router(channel_router)
     dp.include_router(admin_router)
+    dp.include_router(start_router)
     dp.include_router(search_router)
     dp.include_router(inline_router)
 

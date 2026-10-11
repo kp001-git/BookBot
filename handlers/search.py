@@ -20,6 +20,11 @@ from database.models import (
     register_or_update_user,
     increment_user_downloads
 )
+from middlewares.subscription import (
+    check_user_subscription,
+    build_subscription_markup,
+    get_subscription_gate_message
+)
 
 logger = logging.getLogger(__name__)
 router = Router(name="search_router")
@@ -145,11 +150,17 @@ def render_book_card(book: Dict[str, Any], query_id: int = 0, page: int = 1) -> 
         if row:
             buttons.append(row)
 
-    # Navigation back button
+    # Bottom action buttons: Share Link and Back button
+    bot_username = settings.BOT_USERNAME or "AudioSoulBot"
+    share_url = f"https://t.me/{bot_username}?start=book_{book['id']}"
+    action_row = [
+        InlineKeyboardButton(text="🔗 Share Link", url=share_url)
+    ]
     if query_id > 0:
-        buttons.append([
+        action_row.append(
             InlineKeyboardButton(text="⬅️ Back to Results", callback_data=f"page:{query_id}:{page}")
-        ])
+        )
+    buttons.append(action_row)
 
     markup = InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -238,50 +249,10 @@ async def ensure_book_cover(book: Dict[str, Any]) -> None:
             logger.warning(f"On-demand cover lookup error for book {book['id']}: {e}")
 
 
-@router.message(CommandStart())
-async def handle_start(message: Message, command: CommandObject) -> None:
-    """Handles /start and /start book_<id> deep links."""
-    user = message.from_user
-    if user:
-        await register_or_update_user(user.id, user.username)
-
-    args = command.args
-    # Handle deep link: /start book_<id>
-    if args and args.startswith("book_"):
-        raw_id = args.split("book_")[1]
-        if raw_id.isdigit():
-            book_id = int(raw_id)
-            book = await get_book_by_id(book_id)
-            if book:
-                await ensure_book_cover(book)
-                card = render_book_card(book)
-                if card.cover_url:
-                    try:
-                        await message.answer_photo(
-                            photo=card.cover_url,
-                            caption=card.caption_text,
-                            parse_mode="HTML",
-                            reply_markup=card.markup
-                        )
-                        return
-                    except Exception as img_err:
-                        logger.warning(f"Failed to send cover photo ({img_err}), falling back to text.")
-
-                await message.answer(card.text, parse_mode="HTML", reply_markup=card.markup)
-                return
-            else:
-                await message.answer("⚠️ Sorry, that book could not be found.")
-                return
-
-    welcome_text = (
-        "📚 <b>Welcome to the Digital Library & Audiobook Indexer!</b>\n\n"
-        "🔍 <b>How to Search:</b>\n"
-        "• Send any title or author name directly in this chat.\n"
-        "• Or use inline mode anywhere by typing <code>@AudioSoulBot title</code>.\n\n"
-        "⚡ All files are delivered instantly in native formats (Audiobooks, EPUB, PDF)!\n\n"
-        "👨‍💻 Developed by @souldumpp"
-    )
-    await message.answer(welcome_text, parse_mode="HTML", disable_web_page_preview=True)
+# Backward compatibility stub
+async def handle_start(*args, **kwargs):
+    from handlers.start import handle_start as _start
+    return await _start(*args, **kwargs)
 
 
 @router.message(Command("help"))
@@ -304,8 +275,27 @@ async def handle_help(message: Message) -> None:
     await message.answer(help_text, parse_mode="HTML", disable_web_page_preview=True)
 
 
+async def execute_and_send_search(target_message: Message, query: str) -> None:
+    """Executes a search query and answers with paginated results markup."""
+    results, total = await search_books(query, limit=PAGE_SIZE, offset=0)
+    if total == 0:
+        await target_message.answer(
+            f"🔍 No books found matching <b>'{query}'</b>. Try another search keyword.",
+            parse_mode="HTML"
+        )
+        return
+
+    query_id = _store_query(query)
+    markup = build_search_results_markup(results, query_id, page=1, total=total)
+    await target_message.answer(
+        f"🔍 Found <b>{total}</b> result(s) for <b>'{query}'</b>:\n<i>Select a title to view formats:</i>",
+        parse_mode="HTML",
+        reply_markup=markup
+    )
+
+
 @router.message(F.text & ~F.text.startswith("/"))
-async def handle_search_query(message: Message) -> None:
+async def handle_search_query(message: Message, bot: Bot) -> None:
     """Handles direct text search queries in DM."""
     user = message.from_user
     if user:
@@ -316,18 +306,21 @@ async def handle_search_query(message: Message) -> None:
         await message.answer("⚠️ Please enter at least 2 characters to search.")
         return
 
-    results, total = await search_books(query, limit=PAGE_SIZE, offset=0)
-    if total == 0:
-        await message.answer(f"🔍 No books found matching <b>'{query}'</b>. Try another search keyword.", parse_mode="HTML")
+    user_id = user.id if user else 0
+    is_sub, unsub = await check_user_subscription(bot, user_id)
+    if not is_sub:
+        qid = _store_query(query)
+        gate_msg = get_subscription_gate_message(unsub)
+        markup = build_subscription_markup(f"search:{qid}")
+        await message.answer(
+            gate_msg,
+            parse_mode="HTML",
+            reply_markup=markup,
+            disable_web_page_preview=True
+        )
         return
 
-    query_id = _store_query(query)
-    markup = build_search_results_markup(results, query_id, page=1, total=total)
-    await message.answer(
-        f"🔍 Found <b>{total}</b> result(s) for <b>'{query}'</b>:\n<i>Select a title to view formats:</i>",
-        parse_mode="HTML",
-        reply_markup=markup
-    )
+    await execute_and_send_search(message, query)
 
 
 @router.callback_query(F.data.startswith("page:"))
@@ -381,7 +374,7 @@ async def handle_page_callback(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("book:"))
-async def handle_book_detail_callback(callback: CallbackQuery) -> None:
+async def handle_book_detail_callback(callback: CallbackQuery, bot: Bot) -> None:
     """Opens grouped book card with high-quality cover photo when available."""
     parts = callback.data.split(":")
     if len(parts) != 4:
@@ -391,6 +384,21 @@ async def handle_book_detail_callback(callback: CallbackQuery) -> None:
     book_id = int(parts[1])
     query_id = int(parts[2])
     page = int(parts[3])
+
+    user_id = callback.from_user.id
+    is_sub, unsub = await check_user_subscription(bot, user_id)
+    if not is_sub:
+        await callback.answer("🔒 Subscription required.", show_alert=False)
+        gate_msg = get_subscription_gate_message(unsub)
+        markup = build_subscription_markup(f"book:{book_id}")
+        if callback.message:
+            await callback.message.answer(
+                gate_msg,
+                parse_mode="HTML",
+                reply_markup=markup,
+                disable_web_page_preview=True
+            )
+        return
 
     book = await get_book_by_id(book_id)
     if not book:
@@ -431,30 +439,25 @@ async def handle_book_detail_callback(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("dl:"))
-async def handle_download_callback(callback: CallbackQuery, bot: Bot) -> None:
+async def deliver_file_by_id(
+    bot: Bot,
+    user_id: int,
+    file_row_id: int,
+    reply_to_message: Optional[Message] = None
+) -> bool:
     """Delivers stored media file instantly via Telegram file_id without server bandwidth."""
-    parts = callback.data.split(":")
-    if len(parts) != 2:
-        await callback.answer()
-        return
-
-    file_row_id = int(parts[1])
     file_record = await get_file_by_id(file_row_id)
-
     if not file_record:
-        await callback.answer("File no longer available.", show_alert=True)
-        return
+        if reply_to_message:
+            await reply_to_message.answer("⚠️ File no longer available.")
+        return False
 
-    user_id = callback.from_user.id
     fmt = file_record["format"]
     fname = file_record.get("file_name") or ""
     telegram_file_id = file_record.get("file_id")
     channel_msg_id = file_record.get("channel_message_id")
     title = file_record["clean_title"]
     author = file_record["clean_author"]
-
-    await callback.answer("⚡ Sending file...")
 
     delivered = False
 
@@ -505,8 +508,40 @@ async def handle_download_callback(callback: CallbackQuery, bot: Bot) -> None:
     if delivered:
         await increment_user_downloads(user_id)
     else:
+        if reply_to_message:
+            await reply_to_message.answer("⚠️ Failed to deliver file. Please check back later.")
+
+    return delivered
+
+
+@router.callback_query(F.data.startswith("dl:"))
+async def handle_download_callback(callback: CallbackQuery, bot: Bot) -> None:
+    """Delivers stored media file instantly via Telegram file_id without server bandwidth."""
+    parts = callback.data.split(":")
+    if len(parts) != 2:
+        await callback.answer()
+        return
+
+    file_row_id = int(parts[1])
+    user_id = callback.from_user.id
+
+    # Gatekeeper check
+    is_sub, unsub = await check_user_subscription(bot, user_id)
+    if not is_sub:
+        await callback.answer("🔒 Subscription required to download.", show_alert=False)
+        gate_msg = get_subscription_gate_message(unsub)
+        markup = build_subscription_markup(f"dl:{file_row_id}")
         if callback.message:
-            await callback.message.answer("⚠️ Failed to deliver file. Please check back later.")
+            await callback.message.answer(
+                gate_msg,
+                parse_mode="HTML",
+                reply_markup=markup,
+                disable_web_page_preview=True
+            )
+        return
+
+    await callback.answer("⚡ Sending file...")
+    await deliver_file_by_id(bot, user_id, file_row_id, callback.message)
 
 
 @router.callback_query(F.data == "noop")
