@@ -99,3 +99,81 @@ async def handle_admin_backup(message: Message, bot: Bot) -> None:
     except Exception as e:
         logger.error(f"Failed to generate backup: {e}", exc_info=True)
         await status_msg.edit_text(f"❌ Failed to generate database snapshot: {e}")
+
+
+@router.message(Command("broadcast"))
+async def handle_admin_broadcast(message: Message, bot: Bot) -> None:
+    """
+    Admin command: safe broadcast to all registered users.
+    Rate limited to 25 messages/second to prevent Telegram flood limits.
+    """
+    user = message.from_user
+    if not user or user.id not in settings.ADMIN_IDS:
+        await message.answer("⛔ Access denied. Broadcasting is restricted to administrators.")
+        return
+
+    text = message.text or ""
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer(
+            "📢 <b>Broadcast Console</b>\n\n"
+            "<b>Usage:</b>\n"
+            "<code>/broadcast &lt;HTML or Text Message&gt;</code>\n\n"
+            "<i>Example:</i> <code>/broadcast 📚 Over 100 new audiobooks have been added! Check them out with /search</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    broadcast_content = parts[1].strip()
+    from database.models import get_all_user_ids
+    user_ids = await get_all_user_ids()
+
+    if not user_ids:
+        await message.answer("⚠️ No registered users found in the database to broadcast to.")
+        return
+
+    progress_msg = await message.answer(
+        f"⏳ <b>Starting Broadcast...</b>\nTarget recipients: {len(user_ids)} users\nRate: 25 msg/sec",
+        parse_mode="HTML"
+    )
+
+    import asyncio
+    from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest, TelegramRetryAfter
+
+    sent_count = 0
+    blocked_count = 0
+    failed_count = 0
+
+    for uid in user_ids:
+        try:
+            await bot.send_message(chat_id=uid, text=broadcast_content, parse_mode="HTML")
+            sent_count += 1
+        except TelegramForbiddenError:
+            blocked_count += 1
+        except TelegramRetryAfter as retry:
+            await asyncio.sleep(retry.retry_after)
+            try:
+                await bot.send_message(chat_id=uid, text=broadcast_content, parse_mode="HTML")
+                sent_count += 1
+            except Exception:
+                failed_count += 1
+        except Exception as err:
+            logger.debug(f"Broadcast delivery failed for user {uid}: {err}")
+            failed_count += 1
+
+        # Strict rate limit: 25 msgs/sec -> 1/25 = 0.04s delay per message
+        await asyncio.sleep(0.04)
+
+    summary_text = (
+        "📢 <b>Broadcast Completed!</b>\n\n"
+        f"👥 <b>Total Targets:</b> {len(user_ids)}\n"
+        f"✅ <b>Successfully Sent:</b> {sent_count}\n"
+        f"🚫 <b>Blocked / Deactivated:</b> {blocked_count}\n"
+        f"❌ <b>Other Failures:</b> {failed_count}"
+    )
+
+    try:
+        await progress_msg.edit_text(summary_text, parse_mode="HTML")
+    except Exception:
+        await message.answer(summary_text, parse_mode="HTML")
+

@@ -18,7 +18,9 @@ from database.models import (
     get_file_by_id,
     update_book_metadata,
     register_or_update_user,
-    increment_user_downloads
+    increment_user_downloads,
+    is_favorite,
+    toggle_favorite
 )
 from middlewares.subscription import (
     check_user_subscription,
@@ -114,7 +116,12 @@ class BookCardPayload:
         self.cover_url = cover_url
 
 
-def render_book_card(book: Dict[str, Any], query_id: int = 0, page: int = 1) -> BookCardPayload:
+def render_book_card(
+    book: Dict[str, Any],
+    query_id: int = 0,
+    page: int = 1,
+    is_fav: bool = False
+) -> BookCardPayload:
     """Renders full book card and caption-sized version with format buttons."""
     header_lines = [
         f"📖 <b>Title:</b> {book['clean_title']}",
@@ -150,10 +157,14 @@ def render_book_card(book: Dict[str, Any], query_id: int = 0, page: int = 1) -> 
         if row:
             buttons.append(row)
 
-    # Bottom action buttons: Share Link and Back button
+    # Bottom action buttons: Favorite toggle, Share Link, and Back button
     bot_username = settings.BOT_USERNAME or "AudioSoulBot"
     share_url = f"https://t.me/{bot_username}?start=book_{book['id']}"
+    fav_text = "❌ Remove Favorite" if is_fav else "⭐ Favorite"
+    fav_cb = f"fav:{book['id']}:{query_id}:{page}"
+
     action_row = [
+        InlineKeyboardButton(text=fav_text, callback_data=fav_cb),
         InlineKeyboardButton(text="🔗 Share Link", url=share_url)
     ]
     if query_id > 0:
@@ -407,7 +418,8 @@ async def handle_book_detail_callback(callback: CallbackQuery, bot: Bot) -> None
 
     # Ensure cover exists
     await ensure_book_cover(book)
-    card = render_book_card(book, query_id=query_id, page=page)
+    is_fav = await is_favorite(user_id, book_id)
+    card = render_book_card(book, query_id=query_id, page=page, is_fav=is_fav)
 
     if callback.message:
         if card.cover_url:

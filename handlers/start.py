@@ -40,15 +40,23 @@ WELCOME_TEXT = (
 )
 
 
-async def deliver_book_card_to_user(target: Message, book_id: int) -> None:
+async def deliver_book_card_to_user(target: Message, book_id: int, user_id: Optional[int] = None) -> None:
     """Delivers full book detail card with cover photo or text fallback."""
+    from database.models import is_favorite
     book = await get_book_by_id(book_id)
     if not book:
         await target.answer("⚠️ Sorry, that book could not be found.")
         return
 
+    is_fav = False
+    if user_id:
+        try:
+            is_fav = await is_favorite(user_id, book_id)
+        except Exception:
+            pass
+
     await ensure_book_cover(book)
-    card = render_book_card(book)
+    card = render_book_card(book, is_fav=is_fav)
 
     if card.cover_url:
         try:
@@ -105,7 +113,7 @@ async def handle_start(message: Message, command: CommandObject, bot: Optional[B
 
     # Deep link resolved for subscribed user
     if target_book_id is not None:
-        await deliver_book_card_to_user(message, target_book_id)
+        await deliver_book_card_to_user(message, target_book_id, user_id=user.id if user else None)
         return
 
     # Standard Welcome Message
@@ -148,7 +156,7 @@ async def handle_verify_subscription(callback: CallbackQuery, bot: Bot) -> None:
     if payload.startswith("book:"):
         raw_id = payload.split("book:")[1]
         if raw_id.isdigit() and target_msg:
-            await deliver_book_card_to_user(target_msg, int(raw_id))
+            await deliver_book_card_to_user(target_msg, int(raw_id), user_id=user.id)
             return
 
     elif payload.startswith("dl:"):

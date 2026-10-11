@@ -26,6 +26,9 @@ from handlers.start import router as start_router
 from handlers.search import router as search_router
 from handlers.inline import router as inline_router
 from handlers.admin import router as admin_router
+from handlers.favorites import router as favorites_router
+from handlers.request import router as request_router
+from handlers.editor import router as editor_router
 
 # Configure logging
 logging.basicConfig(
@@ -94,9 +97,12 @@ async def main() -> None:
     dp = Dispatcher()
 
     # Register Routers
-    # Note: Order matters. Channel posts & Admin commands first, then start, search & inline.
+    # Note: Order matters. Channel posts, Admin & Editor commands first, then favorites, requests, start, search & inline.
     dp.include_router(channel_router)
     dp.include_router(admin_router)
+    dp.include_router(editor_router)
+    dp.include_router(favorites_router)
+    dp.include_router(request_router)
     dp.include_router(start_router)
     dp.include_router(search_router)
     dp.include_router(inline_router)
@@ -137,7 +143,8 @@ async def main() -> None:
         # Register bot commands menu in Telegram
         bot_commands = [
             BotCommand(command="start", description="Start bot & search library"),
-            BotCommand(command="help", description="How to search & use bot"),
+            BotCommand(command="favorites", description="View your saved bookmarks"),
+            BotCommand(command="request", description="Request an unlisted book"),
             BotCommand(command="stats", description="Admin metrics & statistics"),
             BotCommand(command="backup", description="Trigger instant database backup"),
         ]

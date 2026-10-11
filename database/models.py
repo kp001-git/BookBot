@@ -3,6 +3,7 @@ import asyncio
 import aiosqlite
 import logging
 from typing import Dict, List, Optional, Tuple, Any
+from config import settings
 from database.connection import get_connection, is_postgres, get_pg_pool
 
 logger = logging.getLogger(__name__)
@@ -104,12 +105,44 @@ async def _sqlite_init_db() -> None:
             );
         """)
 
+        # RBAC Roles table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS roles (
+                user_id INTEGER PRIMARY KEY,
+                role TEXT DEFAULT 'user'
+            );
+        """)
+
+        # User Favorites / Bookmarks table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS favorites (
+                user_id INTEGER NOT NULL,
+                book_id INTEGER NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, book_id),
+                FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+            );
+        """)
+
+        # Community Requests table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                query TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
         # Indices for optimal lookup
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_books_canonical ON books(canonical_title, canonical_author);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_book_id ON book_files(book_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_format ON book_files(book_id, format);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_msg_id ON book_files(channel_message_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_unique_id ON book_files(file_unique_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_favorites_user_id ON favorites(user_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);")
 
         await conn.commit()
         logger.info("SQLite database schema initialized successfully.")
@@ -230,9 +263,13 @@ async def _sqlite_update_book_metadata(
     description: Optional[str] = None,
     rating: Optional[float] = None,
     genres: Optional[str] = None,
-    year: Optional[str] = None
+    year: Optional[str] = None,
+    title: Optional[str] = None,
+    author: Optional[str] = None
 ) -> None:
     async with get_connection() as conn:
+        canonical_title = title.lower().strip() if title else None
+        canonical_author = author.lower().strip() if author else None
         await conn.execute(
             """
             UPDATE books
@@ -240,10 +277,14 @@ async def _sqlite_update_book_metadata(
                 description = COALESCE(?, description),
                 rating = COALESCE(?, rating),
                 genres = COALESCE(?, genres),
-                year = COALESCE(?, year)
+                year = COALESCE(?, year),
+                clean_title = COALESCE(?, clean_title),
+                clean_author = COALESCE(?, clean_author),
+                canonical_title = COALESCE(?, canonical_title),
+                canonical_author = COALESCE(?, canonical_author)
             WHERE id = ?
             """,
-            (cover_url, description, rating, genres, year, book_id)
+            (cover_url, description, rating, genres, year, title, author, canonical_title, canonical_author, book_id)
         )
         await conn.commit()
 
@@ -522,6 +563,164 @@ async def _sqlite_get_all_catalog_books() -> List[Dict[str, Any]]:
         return results
 
 
+async def _sqlite_get_user_role(user_id: int) -> str:
+    """Returns the role of a user from SQLite ('admin', 'moderator', 'user')."""
+    if user_id in settings.ADMIN_IDS:
+        return "admin"
+    async with get_connection() as conn:
+        cursor = await conn.execute("SELECT role FROM roles WHERE user_id = ? LIMIT 1", (user_id,))
+        row = await cursor.fetchone()
+        if row and row["role"]:
+            return row["role"]
+    return "user"
+
+
+async def _sqlite_set_user_role(user_id: int, role: str) -> None:
+    """Assigns a role to a user in SQLite ('admin', 'moderator', 'user')."""
+    async with get_connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO roles (user_id, role)
+            VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET role = excluded.role
+            """,
+            (user_id, role.lower().strip())
+        )
+        await conn.commit()
+
+
+async def _sqlite_toggle_favorite(user_id: int, book_id: int) -> bool:
+    """Toggles bookmark for a book in SQLite. Returns True if added, False if removed."""
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "SELECT 1 FROM favorites WHERE user_id = ? AND book_id = ? LIMIT 1",
+            (user_id, book_id)
+        )
+        row = await cursor.fetchone()
+        if row:
+            await conn.execute("DELETE FROM favorites WHERE user_id = ? AND book_id = ?", (user_id, book_id))
+            await conn.commit()
+            return False
+        else:
+            await conn.execute(
+                "INSERT INTO favorites (user_id, book_id) VALUES (?, ?)",
+                (user_id, book_id)
+            )
+            await conn.commit()
+            return True
+
+
+async def _sqlite_is_favorite(user_id: int, book_id: int) -> bool:
+    """Checks if a book is bookmarked by a user in SQLite."""
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "SELECT 1 FROM favorites WHERE user_id = ? AND book_id = ? LIMIT 1",
+            (user_id, book_id)
+        )
+        return (await cursor.fetchone()) is not None
+
+
+async def _sqlite_get_user_favorites(user_id: int) -> List[Dict[str, Any]]:
+    """Retrieves all bookmarked books for a user from SQLite."""
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            """
+            SELECT b.id, b.clean_title, b.clean_author, b.cover_url, b.description,
+                   b.rating, b.genres, b.year,
+                   GROUP_CONCAT(DISTINCT f.format) as formats,
+                   fav.added_at
+            FROM favorites fav
+            JOIN books b ON b.id = fav.book_id
+            LEFT JOIN book_files f ON f.book_id = b.id
+            WHERE fav.user_id = ?
+            GROUP BY b.id, fav.added_at
+            ORDER BY fav.added_at DESC
+            """,
+            (user_id,)
+        )
+        rows = await cursor.fetchall()
+        results = []
+        for r in rows:
+            formats_str = r["formats"] or ""
+            formats_list = [fmt.strip() for fmt in formats_str.split(",") if fmt.strip()]
+            results.append({
+                "id": r["id"],
+                "clean_title": r["clean_title"],
+                "clean_author": r["clean_author"] or "Unknown Author",
+                "cover_url": r["cover_url"],
+                "description": r["description"],
+                "rating": r["rating"],
+                "genres": r["genres"],
+                "year": r["year"],
+                "formats": formats_list,
+                "added_at": r["added_at"]
+            })
+        return results
+
+
+async def _sqlite_create_request(user_id: int, query: str) -> int:
+    """Inserts a community book request in SQLite. Returns request ID."""
+    async with get_connection() as conn:
+        cursor = await conn.execute(
+            "INSERT INTO requests (user_id, query) VALUES (?, ?)",
+            (user_id, query.strip())
+        )
+        await conn.commit()
+        return cursor.lastrowid
+
+
+async def _sqlite_update_request_status(request_id: int, status: str) -> Optional[Dict[str, Any]]:
+    """Updates status of a book request in SQLite ('fulfilled', 'rejected', etc.). Returns request info."""
+    async with get_connection() as conn:
+        cursor = await conn.execute("SELECT id, user_id, query, status, created_at FROM requests WHERE id = ? LIMIT 1", (request_id,))
+        row = await cursor.fetchone()
+        if not row:
+            return None
+        await conn.execute("UPDATE requests SET status = ? WHERE id = ?", (status.lower().strip(), request_id))
+        await conn.commit()
+        return {
+            "id": row["id"],
+            "user_id": row["user_id"],
+            "query": row["query"],
+            "status": status.lower().strip(),
+            "created_at": row["created_at"]
+        }
+
+
+async def _sqlite_get_requests(status: Optional[str] = "pending", limit: int = 20) -> List[Dict[str, Any]]:
+    """Retrieves book requests from SQLite."""
+    async with get_connection() as conn:
+        if status:
+            cursor = await conn.execute(
+                "SELECT id, user_id, query, status, created_at FROM requests WHERE status = ? ORDER BY id DESC LIMIT ?",
+                (status.lower().strip(), limit)
+            )
+        else:
+            cursor = await conn.execute(
+                "SELECT id, user_id, query, status, created_at FROM requests ORDER BY id DESC LIMIT ?",
+                (limit,)
+            )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "id": r["id"],
+                "user_id": r["user_id"],
+                "query": r["query"],
+                "status": r["status"],
+                "created_at": r["created_at"]
+            }
+            for r in rows
+        ]
+
+
+async def _sqlite_delete_book_file(file_id: int) -> bool:
+    """Deletes a specific book_files row from SQLite. Returns True if deleted."""
+    async with get_connection() as conn:
+        cursor = await conn.execute("DELETE FROM book_files WHERE id = ?", (file_id,))
+        await conn.commit()
+        return cursor.rowcount > 0
+
+
 # ==============================================================================
 # POSTGRESQL IMPLEMENTATION (MODE A)
 # ==============================================================================
@@ -588,12 +787,43 @@ async def _pg_init_db() -> None:
             );
         """)
 
+        # RBAC Roles table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS roles (
+                user_id BIGINT PRIMARY KEY,
+                role TEXT DEFAULT 'user'
+            );
+        """)
+
+        # User Favorites / Bookmarks table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS favorites (
+                user_id BIGINT NOT NULL,
+                book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, book_id)
+            );
+        """)
+
+        # Community Requests table
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS requests (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                query TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
         # Indices
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_books_canonical ON books(canonical_title, canonical_author);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_book_id ON book_files(book_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_format ON book_files(book_id, format);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_msg_id ON book_files(channel_message_id);")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_book_files_unique_id ON book_files(file_unique_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_favorites_user_id ON favorites(user_id);")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status);")
 
         # Full-Text Search tsvector index
         await conn.execute("""
@@ -714,9 +944,13 @@ async def _pg_update_book_metadata(
     description: Optional[str] = None,
     rating: Optional[float] = None,
     genres: Optional[str] = None,
-    year: Optional[str] = None
+    year: Optional[str] = None,
+    title: Optional[str] = None,
+    author: Optional[str] = None
 ) -> None:
     pool = await get_pg_pool()
+    canonical_title = title.lower().strip() if title else None
+    canonical_author = author.lower().strip() if author else None
     async with pool.acquire() as conn:
         await conn.execute(
             """
@@ -725,10 +959,14 @@ async def _pg_update_book_metadata(
                 description = COALESCE($2, description),
                 rating = COALESCE($3, rating),
                 genres = COALESCE($4, genres),
-                year = COALESCE($5, year)
-            WHERE id = $6
+                year = COALESCE($5, year),
+                clean_title = COALESCE($6, clean_title),
+                clean_author = COALESCE($7, clean_author),
+                canonical_title = COALESCE($8, canonical_title),
+                canonical_author = COALESCE($9, canonical_author)
+            WHERE id = $10
             """,
-            cover_url, description, rating, genres, year, book_id
+            cover_url, description, rating, genres, year, title, author, canonical_title, canonical_author, book_id
         )
 
 
@@ -1036,6 +1274,170 @@ async def _pg_get_all_catalog_books() -> List[Dict[str, Any]]:
         return results
 
 
+async def _pg_get_user_role(user_id: int) -> str:
+    """Returns the role of a user from PostgreSQL ('admin', 'moderator', 'user')."""
+    if user_id in settings.ADMIN_IDS:
+        return "admin"
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT role FROM roles WHERE user_id = $1 LIMIT 1", user_id)
+        if row and row["role"]:
+            return row["role"]
+    return "user"
+
+
+async def _pg_set_user_role(user_id: int, role: str) -> None:
+    """Assigns a role to a user in PostgreSQL ('admin', 'moderator', 'user')."""
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO roles (user_id, role)
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role
+            """,
+            user_id, role.lower().strip()
+        )
+
+
+async def _pg_toggle_favorite(user_id: int, book_id: int) -> bool:
+    """Toggles bookmark for a book in PostgreSQL. Returns True if added, False if removed."""
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM favorites WHERE user_id = $1 AND book_id = $2 LIMIT 1",
+            user_id, book_id
+        )
+        if row:
+            await conn.execute("DELETE FROM favorites WHERE user_id = $1 AND book_id = $2", user_id, book_id)
+            return False
+        else:
+            await conn.execute(
+                "INSERT INTO favorites (user_id, book_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                user_id, book_id
+            )
+            return True
+
+
+async def _pg_is_favorite(user_id: int, book_id: int) -> bool:
+    """Checks if a book is bookmarked by a user in PostgreSQL."""
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM favorites WHERE user_id = $1 AND book_id = $2 LIMIT 1",
+            user_id, book_id
+        )
+        return row is not None
+
+
+async def _pg_get_user_favorites(user_id: int) -> List[Dict[str, Any]]:
+    """Retrieves all bookmarked books for a user from PostgreSQL."""
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT b.id, b.clean_title, b.clean_author, b.cover_url, b.description,
+                   b.rating, b.genres, b.year,
+                   STRING_AGG(DISTINCT f.format, ',') as formats,
+                   fav.added_at
+            FROM favorites fav
+            JOIN books b ON b.id = fav.book_id
+            LEFT JOIN book_files f ON f.book_id = b.id
+            WHERE fav.user_id = $1
+            GROUP BY b.id, fav.added_at
+            ORDER BY fav.added_at DESC
+            """,
+            user_id
+        )
+        results = []
+        for r in rows:
+            formats_str = r["formats"] or ""
+            formats_list = [fmt.strip() for fmt in formats_str.split(",") if fmt.strip()]
+            results.append({
+                "id": r["id"],
+                "clean_title": r["clean_title"],
+                "clean_author": r["clean_author"] or "Unknown Author",
+                "cover_url": r["cover_url"],
+                "description": r["description"],
+                "rating": r["rating"],
+                "genres": r["genres"],
+                "year": r["year"],
+                "formats": formats_list,
+                "added_at": r["added_at"]
+            })
+        return results
+
+
+async def _pg_create_request(user_id: int, query: str) -> int:
+    """Inserts a community book request in PostgreSQL. Returns request ID."""
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO requests (user_id, query) VALUES ($1, $2) RETURNING id",
+            user_id, query.strip()
+        )
+        return row["id"]
+
+
+async def _pg_update_request_status(request_id: int, status: str) -> Optional[Dict[str, Any]]:
+    """Updates status of a book request in PostgreSQL ('fulfilled', 'rejected', etc.). Returns request info."""
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE requests
+            SET status = $1
+            WHERE id = $2
+            RETURNING id, user_id, query, status, created_at
+            """,
+            status.lower().strip(), request_id
+        )
+        if not row:
+            return None
+        return {
+            "id": row["id"],
+            "user_id": row["user_id"],
+            "query": row["query"],
+            "status": row["status"],
+            "created_at": row["created_at"]
+        }
+
+
+async def _pg_get_requests(status: Optional[str] = "pending", limit: int = 20) -> List[Dict[str, Any]]:
+    """Retrieves book requests from PostgreSQL."""
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        if status:
+            rows = await conn.fetch(
+                "SELECT id, user_id, query, status, created_at FROM requests WHERE status = $1 ORDER BY id DESC LIMIT $2",
+                status.lower().strip(), limit
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT id, user_id, query, status, created_at FROM requests ORDER BY id DESC LIMIT $1",
+                limit
+            )
+        return [
+            {
+                "id": r["id"],
+                "user_id": r["user_id"],
+                "query": r["query"],
+                "status": r["status"],
+                "created_at": r["created_at"]
+            }
+            for r in rows
+        ]
+
+
+async def _pg_delete_book_file(file_id: int) -> bool:
+    """Deletes a specific book_files row from PostgreSQL. Returns True if deleted."""
+    pool = await get_pg_pool()
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM book_files WHERE id = $1", file_id)
+        # res looks like 'DELETE 1'
+        return res != "DELETE 0"
+
+
 # ==============================================================================
 # UNIFIED PUBLIC API (AUTOMATIC ENGINE DISPATCH)
 # ==============================================================================
@@ -1129,13 +1531,87 @@ async def update_book_metadata(
     description: Optional[str] = None,
     rating: Optional[float] = None,
     genres: Optional[str] = None,
-    year: Optional[str] = None
+    year: Optional[str] = None,
+    title: Optional[str] = None,
+    author: Optional[str] = None
 ) -> None:
-    """Updates enriched metadata for an existing book."""
+    """Updates enriched metadata, title, or author for an existing book."""
     if is_postgres():
-        await _pg_update_book_metadata(book_id, cover_url, description, rating, genres, year)
+        await _pg_update_book_metadata(book_id, cover_url, description, rating, genres, year, title=title, author=author)
     else:
-        await _sqlite_update_book_metadata(book_id, cover_url, description, rating, genres, year)
+        await _sqlite_update_book_metadata(book_id, cover_url, description, rating, genres, year, title=title, author=author)
+
+
+async def get_user_role(user_id: int) -> str:
+    """Returns the role of a user ('admin', 'moderator', 'user')."""
+    if is_postgres():
+        return await _pg_get_user_role(user_id)
+    else:
+        return await _sqlite_get_user_role(user_id)
+
+
+async def set_user_role(user_id: int, role: str) -> None:
+    """Sets the role of a user ('admin', 'moderator', 'user')."""
+    if is_postgres():
+        await _pg_set_user_role(user_id, role)
+    else:
+        await _sqlite_set_user_role(user_id, role)
+
+
+async def toggle_favorite(user_id: int, book_id: int) -> bool:
+    """Toggles bookmark status of a book. Returns True if added, False if removed."""
+    if is_postgres():
+        return await _pg_toggle_favorite(user_id, book_id)
+    else:
+        return await _sqlite_toggle_favorite(user_id, book_id)
+
+
+async def is_favorite(user_id: int, book_id: int) -> bool:
+    """Checks if a book is currently bookmarked by user."""
+    if is_postgres():
+        return await _pg_is_favorite(user_id, book_id)
+    else:
+        return await _sqlite_is_favorite(user_id, book_id)
+
+
+async def get_user_favorites(user_id: int) -> List[Dict[str, Any]]:
+    """Retrieves all favorite books for a user."""
+    if is_postgres():
+        return await _pg_get_user_favorites(user_id)
+    else:
+        return await _sqlite_get_user_favorites(user_id)
+
+
+async def create_request(user_id: int, query: str) -> int:
+    """Creates a new book request. Returns request ID."""
+    if is_postgres():
+        return await _pg_create_request(user_id, query)
+    else:
+        return await _sqlite_create_request(user_id, query)
+
+
+async def update_request_status(request_id: int, status: str) -> Optional[Dict[str, Any]]:
+    """Updates status of a request ('fulfilled', 'rejected', etc.). Returns request info."""
+    if is_postgres():
+        return await _pg_update_request_status(request_id, status)
+    else:
+        return await _sqlite_update_request_status(request_id, status)
+
+
+async def get_requests(status: Optional[str] = "pending", limit: int = 20) -> List[Dict[str, Any]]:
+    """Retrieves book requests."""
+    if is_postgres():
+        return await _pg_get_requests(status=status, limit=limit)
+    else:
+        return await _sqlite_get_requests(status=status, limit=limit)
+
+
+async def delete_book_file(file_id: int) -> bool:
+    """Deletes a specific book_files row from database. Returns True if deleted."""
+    if is_postgres():
+        return await _pg_delete_book_file(file_id)
+    else:
+        return await _sqlite_delete_book_file(file_id)
 
 
 async def get_all_catalog_books() -> List[Dict[str, Any]]:
@@ -1202,6 +1678,20 @@ async def increment_user_downloads(user_id: int) -> None:
         await _pg_increment_user_downloads(user_id)
     else:
         await _sqlite_increment_user_downloads(user_id)
+
+
+async def get_all_user_ids() -> List[int]:
+    """Retrieves all registered user IDs for broadcasting."""
+    if is_postgres():
+        pool = await get_pg_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("SELECT user_id FROM users")
+            return [int(r["user_id"]) for r in rows]
+    else:
+        async with get_connection() as conn:
+            cursor = await conn.execute("SELECT user_id FROM users")
+            rows = await cursor.fetchall()
+            return [int(r["user_id"]) for r in rows]
 
 
 async def get_stats() -> Dict[str, Any]:
