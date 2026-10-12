@@ -165,10 +165,10 @@ class TestPhase2GroupTopicAndDMRedirection(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(button.url, "https://t.me/AudioSoulBot?start=request")
 
     async def test_group_request_direct(self):
-        """Tests /request <query> in group saving to DB and confirming."""
+        """Tests /request <query> in group saving to DB and confirming directly."""
         msg = MagicMock()
         msg.reply = AsyncMock()
-        msg.from_user = MagicMock(id=112233, username="reader_bob")
+        msg.from_user = MagicMock(id=112233, full_name="Bob Jones", username="reader_bob")
         msg.reply_to_message = None
         bot_mock = MagicMock()
 
@@ -179,37 +179,87 @@ class TestPhase2GroupTopicAndDMRedirection(unittest.IsolatedAsyncioTestCase):
         text = args[0]
         link_options = kwargs.get("link_preview_options")
 
-        self.assertIn("Request Received!", text)
+        self.assertIn("tg://user?id=112233", text)
+        self.assertIn("Bob Jones", text)
         self.assertIn("Steve Jobs by Walter Isaacson", text)
+        self.assertIn("registered into our library curation queue", text)
         self.assertTrue(link_options.is_disabled)
 
         # Verify DB entry
         requests = await get_requests(status="pending")
-        self.assertTrue(any(r["query"] == "Steve Jobs by Walter Isaacson" for r in requests))
+        self.assertTrue(any(r["query"] == "Steve Jobs by Walter Isaacson" and r["user_id"] == 112233 for r in requests))
 
     async def test_group_request_via_reply(self):
-        """Tests /request in reply to a message extracting title and saving to DB."""
+        """Tests admin proxy /request in reply to a message attributing request to original user."""
+        target_user = MagicMock(id=445566, full_name="Alice Wonderland", username="alice")
         replied_msg = MagicMock()
+        replied_msg.from_user = target_user
         replied_msg.text = "Can someone upload Sapiens by Yuval Noah Harari?"
         replied_msg.caption = None
+        replied_msg.reply = AsyncMock()
 
+        # Admin sends /request without args in reply to Alice's message
+        admin_user = MagicMock(id=999999, full_name="Admin Boss", username="admin_boss")
         msg = MagicMock()
-        msg.reply = AsyncMock()
-        msg.from_user = MagicMock(id=445566, username="alice")
+        msg.from_user = admin_user
         msg.reply_to_message = replied_msg
         bot_mock = MagicMock()
 
         await handle_group_request(msg, query="", bot=bot_mock)
 
-        msg.reply.assert_called_once()
-        args, kwargs = msg.reply.call_args
+        # Reply must be sent directly to Alice's message
+        replied_msg.reply.assert_called_once()
+        args, kwargs = replied_msg.reply.call_args
         text = args[0]
-        self.assertIn("Request Received!", text)
+        self.assertIn("tg://user?id=445566", text)
+        self.assertIn("Alice Wonderland", text)
         self.assertIn("Can someone upload Sapiens", text)
+        self.assertIn("registered into our library curation queue", text)
 
-        # Verify DB entry
+        # Verify DB entry is attributed to target user Alice (445566)
         requests = await get_requests(status="pending")
-        self.assertTrue(any("Sapiens" in r["query"] for r in requests))
+        self.assertTrue(any("Sapiens" in r["query"] and r["user_id"] == 445566 for r in requests))
+
+    async def test_group_request_proxy_with_argument(self):
+        """Tests admin proxy /request <Title> in reply using the explicit title argument."""
+        target_user = MagicMock(id=778899, full_name="Charlie Brown", username="charlie")
+        replied_msg = MagicMock()
+        replied_msg.from_user = target_user
+        replied_msg.text = "I really want that habits book!"
+        replied_msg.caption = None
+        replied_msg.reply = AsyncMock()
+
+        admin_user = MagicMock(id=999999, full_name="Admin Boss", username="admin_boss")
+        msg = MagicMock()
+        msg.from_user = admin_user
+        msg.reply_to_message = replied_msg
+        bot_mock = MagicMock()
+
+        await handle_group_request(msg, query="Atomic Habits by James Clear", bot=bot_mock)
+
+        replied_msg.reply.assert_called_once()
+        args, kwargs = replied_msg.reply.call_args
+        text = args[0]
+        self.assertIn("tg://user?id=778899", text)
+        self.assertIn("Charlie Brown", text)
+        self.assertIn("Atomic Habits by James Clear", text)
+
+        requests = await get_requests(status="pending")
+        self.assertTrue(any(r["query"] == "Atomic Habits by James Clear" and r["user_id"] == 778899 for r in requests))
+
+    async def test_group_request_empty_prompt(self):
+        """Tests prompt when query is empty and no replied message."""
+        msg = MagicMock()
+        msg.reply = AsyncMock()
+        msg.from_user = MagicMock(id=112233)
+        msg.reply_to_message = None
+        bot_mock = MagicMock()
+
+        await handle_group_request(msg, query="", bot=bot_mock)
+
+        msg.reply.assert_called_once()
+        args, _ = msg.reply.call_args
+        self.assertIn("Please provide a book title or reply to a message containing one", args[0])
 
 
 if __name__ == "__main__":
