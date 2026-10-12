@@ -6,7 +6,8 @@ from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardMarkup,
-    InlineKeyboardButton
+    InlineKeyboardButton,
+    LinkPreviewOptions
 )
 
 from config import settings
@@ -70,7 +71,13 @@ async def deliver_book_card_to_user(target: Message, book_id: int, user_id: Opti
         except Exception as img_err:
             logger.warning(f"Failed to send cover photo ({img_err}), falling back to text.")
 
-    await target.answer(card.text, parse_mode="HTML", reply_markup=card.markup)
+    await target.answer(
+        card.text,
+        parse_mode="HTML",
+        reply_markup=card.markup,
+        disable_web_page_preview=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True)
+    )
 
 
 @router.message(CommandStart())
@@ -107,7 +114,8 @@ async def handle_start(message: Message, command: CommandObject, bot: Optional[B
                 gate_msg,
                 parse_mode="HTML",
                 reply_markup=markup,
-                disable_web_page_preview=True
+                disable_web_page_preview=True,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
             )
             return
 
@@ -117,7 +125,12 @@ async def handle_start(message: Message, command: CommandObject, bot: Optional[B
         return
 
     # Standard Welcome Message
-    await message.answer(WELCOME_TEXT, parse_mode="HTML", disable_web_page_preview=True)
+    await message.answer(
+        WELCOME_TEXT,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True)
+    )
 
 
 @router.callback_query(F.data.startswith("verify_sub"))
@@ -174,4 +187,9 @@ async def handle_verify_subscription(callback: CallbackQuery, bot: Bot) -> None:
 
     # Default to welcome message
     if target_msg:
-        await target_msg.answer(WELCOME_TEXT, parse_mode="HTML", disable_web_page_preview=True)
+        await target_msg.answer(
+            WELCOME_TEXT,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True)
+        )

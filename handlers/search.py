@@ -7,7 +7,8 @@ from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardMarkup,
-    InlineKeyboardButton
+    InlineKeyboardButton,
+    LinkPreviewOptions
 )
 
 from config import config, settings
@@ -283,7 +284,12 @@ async def handle_help(message: Message) -> None:
         "• <b>PDFs:</b> Documents and illustrated editions\n\n"
         "👨‍💻 Developed by @souldumpp"
     )
-    await message.answer(help_text, parse_mode="HTML", disable_web_page_preview=True)
+    await message.answer(
+        help_text,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        link_preview_options=LinkPreviewOptions(is_disabled=True)
+    )
 
 
 async def execute_and_send_search(target_message: Message, query: str) -> None:
@@ -292,7 +298,8 @@ async def execute_and_send_search(target_message: Message, query: str) -> None:
     if total == 0:
         await target_message.answer(
             f"🔍 No books found matching <b>'{query}'</b>. Try another search keyword.",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
         return
 
@@ -301,18 +308,38 @@ async def execute_and_send_search(target_message: Message, query: str) -> None:
     await target_message.answer(
         f"🔍 Found <b>{total}</b> result(s) for <b>'{query}'</b>:\n<i>Select a title to view formats:</i>",
         parse_mode="HTML",
-        reply_markup=markup
+        reply_markup=markup,
+        link_preview_options=LinkPreviewOptions(is_disabled=True)
     )
 
 
-@router.message(F.text & ~F.text.startswith("/"))
+@router.message(F.chat.type == "private", Command("search"))
+async def handle_private_search_command(message: Message, command: CommandObject, bot: Bot) -> None:
+    """Handles /search command in private chat."""
+    query = (command.args or "").strip()
+    if not query:
+        await message.answer(
+            "🔍 <b>Library Search:</b>\nPlease specify a book title or author.\n<i>Example:</i> <code>/search Dune</code>",
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True)
+        )
+        return
+    await _process_search_query(message, query, bot)
+
+
+@router.message(F.chat.type == "private", F.text & ~F.text.startswith("/"))
 async def handle_search_query(message: Message, bot: Bot) -> None:
     """Handles direct text search queries in DM."""
+    query = message.text.strip()
+    await _process_search_query(message, query, bot)
+
+
+async def _process_search_query(message: Message, query: str, bot: Bot) -> None:
+    """Internal helper to validate and execute search with subscription gatekeeping."""
     user = message.from_user
     if user:
         await register_or_update_user(user.id, user.username)
 
-    query = message.text.strip()
     if len(query) < 2:
         await message.answer("⚠️ Please enter at least 2 characters to search.")
         return
@@ -327,7 +354,8 @@ async def handle_search_query(message: Message, bot: Bot) -> None:
             gate_msg,
             parse_mode="HTML",
             reply_markup=markup,
-            disable_web_page_preview=True
+            disable_web_page_preview=True,
+            link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
         return
 
@@ -407,7 +435,8 @@ async def handle_book_detail_callback(callback: CallbackQuery, bot: Bot) -> None
                 gate_msg,
                 parse_mode="HTML",
                 reply_markup=markup,
-                disable_web_page_preview=True
+                disable_web_page_preview=True,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
             )
         return
 
@@ -444,9 +473,21 @@ async def handle_book_detail_callback(callback: CallbackQuery, bot: Bot) -> None
 
         # Fallback to text message
         try:
-            await callback.message.edit_text(card.text, parse_mode="HTML", reply_markup=card.markup)
+            await callback.message.edit_text(
+                card.text,
+                parse_mode="HTML",
+                reply_markup=card.markup,
+                disable_web_page_preview=True,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
         except Exception:
-            await callback.message.answer(card.text, parse_mode="HTML", reply_markup=card.markup)
+            await callback.message.answer(
+                card.text,
+                parse_mode="HTML",
+                reply_markup=card.markup,
+                disable_web_page_preview=True,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
+            )
 
     await callback.answer()
 
@@ -548,7 +589,8 @@ async def handle_download_callback(callback: CallbackQuery, bot: Bot) -> None:
                 gate_msg,
                 parse_mode="HTML",
                 reply_markup=markup,
-                disable_web_page_preview=True
+                disable_web_page_preview=True,
+                link_preview_options=LinkPreviewOptions(is_disabled=True)
             )
         return
 

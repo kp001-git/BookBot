@@ -2,7 +2,13 @@ import logging
 from typing import Optional
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    LinkPreviewOptions
+)
 
 from database.models import (
     create_request,
@@ -21,7 +27,7 @@ async def _is_staff(user_id: int) -> bool:
     return role in ("admin", "moderator")
 
 
-@router.message(Command("request"))
+@router.message(F.chat.type == "private", Command("request"))
 async def handle_request_command(message: Message) -> None:
     """
     /request <title or author> - Submits a book request to the community request desk.
@@ -39,7 +45,8 @@ async def handle_request_command(message: Message) -> None:
             "<b>Usage:</b>\n"
             "<code>/request &lt;book title or author&gt;</code>\n\n"
             "<i>Example:</i> <code>/request Atomic Habits by James Clear</code>",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            link_preview_options=LinkPreviewOptions(is_disabled=True)
         )
         return
 
@@ -50,7 +57,8 @@ async def handle_request_command(message: Message) -> None:
         f"✅ <b>Request Submitted!</b> (ID: <code>#{req_id}</code>)\n\n"
         f"📖 <b>Query:</b> <i>{query}</i>\n\n"
         "Our curators have been notified. You will receive an instant notification here once it is added to the library!",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        link_preview_options=LinkPreviewOptions(is_disabled=True)
     )
 
 

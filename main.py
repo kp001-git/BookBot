@@ -29,6 +29,8 @@ from handlers.admin import router as admin_router
 from handlers.favorites import router as favorites_router
 from handlers.request import router as request_router
 from handlers.editor import router as editor_router
+from handlers.group_search import router as group_search_router
+from handlers.group_request import router as group_request_router
 
 # Configure logging
 logging.basicConfig(
@@ -97,10 +99,12 @@ async def main() -> None:
     dp = Dispatcher()
 
     # Register Routers
-    # Note: Order matters. Channel posts, Admin & Editor commands first, then favorites, requests, start, search & inline.
+    # Note: Order matters. Channel posts, Admin, Editor & Group commands first, then favorites, requests, start, search & inline.
     dp.include_router(channel_router)
     dp.include_router(admin_router)
     dp.include_router(editor_router)
+    dp.include_router(group_search_router)
+    dp.include_router(group_request_router)
     dp.include_router(favorites_router)
     dp.include_router(request_router)
     dp.include_router(start_router)
